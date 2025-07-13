@@ -88,7 +88,6 @@ class ListeningPlayer(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         # --- Keyboard Bindings ---
-        self.bind('<KeyPress>', self.on_key_press)
         self.focus_set()
     
     def setup_styles(self):
@@ -137,7 +136,6 @@ class ListeningPlayer(tk.Tk):
         style.map("Primary.TButton",
                   background=[('active', self.colors['bg_hover'])])
 
-        # MODIFIED: Control button font is now larger and bold
         style.configure("Control.TButton",
                        background=self.colors['bg'],
                        foreground=self.colors['text_secondary'],
@@ -164,27 +162,19 @@ class ListeningPlayer(tk.Tk):
     def create_folders(self):
         """创建音频和字幕文件夹"""
         try:
-            # 获取程序运行目录
             if hasattr(sys, '_MEIPASS'):
-                # PyInstaller打包后的临时目录
                 base_dir = os.path.dirname(sys.executable)
             else:
-                # 开发环境
                 base_dir = os.path.dirname(os.path.abspath(__file__))
             
-            # 创建音频文件夹
             self.audio_folder = os.path.join(base_dir, "音频")
             if not os.path.exists(self.audio_folder):
                 os.makedirs(self.audio_folder)
-                print(f"已创建音频文件夹: {self.audio_folder}")
             
-            # 创建字幕文件夹
             self.subtitle_folder = os.path.join(base_dir, "字幕")
             if not os.path.exists(self.subtitle_folder):
                 os.makedirs(self.subtitle_folder)
-                print(f"已创建字幕文件夹: {self.subtitle_folder}")
             
-            # 创建使用说明文件
             readme_path = os.path.join(base_dir, "使用说明.txt")
             if not os.path.exists(readme_path):
                 with open(readme_path, 'w', encoding='utf-8') as f:
@@ -200,14 +190,12 @@ class ListeningPlayer(tk.Tk):
                     f.write("- 右箭头：下一句\n")
                     f.write("- 上箭头：显示字幕\n")
                     f.write("- 下箭头：隐藏字幕\n")
-                print(f"已创建使用说明文件: {readme_path}")
                 
         except Exception as e:
             print(f"创建文件夹时出错: {e}")
 
     def setup_key_bindings(self):
-        """设置键盘绑定以防止TTK控件拦截空格键"""
-        # 为主窗口设置焦点捕获，确保不被子控件拦截
+        """设置全局键盘绑定"""
         self.bind_all('<KeyPress-space>', self.global_space_handler)
         self.bind_all('<KeyPress-Left>', self.global_left_handler)
         self.bind_all('<KeyPress-Right>', self.global_right_handler)
@@ -216,10 +204,12 @@ class ListeningPlayer(tk.Tk):
         
     def global_space_handler(self, event):
         """全局空格键处理器"""
-        # 只有在加载了音频文件后才响应空格键
         if self.is_loaded:
             self.toggle_play_pause()
-        return "break"
+        else:
+            # 在主页时，如果按空格，则尝试加载文件
+            self.load_files()
+        return "break" 
         
     def global_left_handler(self, event):
         """全局左箭头处理器"""
@@ -301,30 +291,6 @@ class ListeningPlayer(tk.Tk):
         history_data = cursor.fetchall()
         return None, None, history_data
 
-    def on_key_press(self, event):
-        """处理键盘按键事件，确保空格键只用于播放/暂停控制"""
-        if event.keysym == 'space':
-            # 只有在加载了音频文件后才响应空格键
-            if self.is_loaded:
-                self.toggle_play_pause()
-            return "break"  # 阻止事件继续传播
-        elif event.keysym == 'Left':
-            if self.is_loaded:
-                self.jump_to_sentence(-1)
-            return "break"
-        elif event.keysym == 'Right':
-            if self.is_loaded:
-                self.jump_to_sentence(1)
-            return "break"
-        elif event.keysym == 'Up':
-            if self.is_loaded:
-                self.show_subtitles()
-            return "break"
-        elif event.keysym == 'Down':
-            if self.is_loaded:
-                self.hide_subtitles()
-            return "break"
-
     def on_closing(self):
         self.finalize_current_audio_session()
         self.db_conn.close()
@@ -332,7 +298,6 @@ class ListeningPlayer(tk.Tk):
 
     def create_views(self):
         font_main = "Segoe UI"
-        # --- Initial View ---
         self.initial_frame = ttk.Frame(self)
 
         top_section = ttk.Frame(self.initial_frame)
@@ -370,14 +335,11 @@ class ListeningPlayer(tk.Tk):
         self.history_context_menu.add_command(label="清空全部历史", command=self.clear_all_history)
         self.history_tree.bind("<Button-3>", self.show_history_context_menu)
 
-        # --- Player View ---
         self.player_frame = ttk.Frame(self)
 
-        # MODIFIED: Text frame now fills horizontally to allow for justified text.
         text_frame = ttk.Frame(self.player_frame, padding=(40, 40))
         text_frame.pack(expand=True, fill=tk.BOTH)
         
-        # Use Text widget for justified alignment
         self.prev_line_text = tk.Text(text_frame, height=2, font=(font_main, 12), 
                                      foreground=self.colors['text_muted'], 
                                      background=self.colors['bg'],
@@ -385,7 +347,6 @@ class ListeningPlayer(tk.Tk):
                                      state=tk.DISABLED, cursor="")
         self.prev_line_text.pack(pady=10, fill='x')
         
-        # Main current line with justified text
         self.current_line_text = tk.Text(text_frame, height=3, font=(font_main, 20), 
                                         foreground=self.colors['text_primary'], 
                                         background=self.colors['bg'],
@@ -400,10 +361,8 @@ class ListeningPlayer(tk.Tk):
                                      state=tk.DISABLED, cursor="")
         self.next_line_text.pack(pady=10, fill='x')
         
-        # Configure justified tag for current line - this will create a justified text alignment
         self.current_line_text.tag_configure("justified", justify="center")
         
-        # Configure center alignment for previous and next lines
         self.prev_line_text.tag_configure("centered", justify="center")
         self.next_line_text.tag_configure("centered", justify="center")
 
@@ -412,7 +371,6 @@ class ListeningPlayer(tk.Tk):
         bottom_controls_frame = ttk.Frame(self.player_frame)
         bottom_controls_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 15))
 
-        # MODIFIED: Progress container now has the same horizontal padding as the text frame.
         progress_container = ttk.Frame(bottom_controls_frame, padding=(40, 0))
         progress_container.pack(fill=tk.X, expand=True, pady=(0, 5))
 
@@ -448,7 +406,6 @@ class ListeningPlayer(tk.Tk):
         btn_home.pack(side=tk.LEFT)
     
     def show_history_context_menu(self, event):
-        """Displays the context menu on right-click."""
         item_id = self.history_tree.identify_row(event.y)
         if item_id:
             if item_id not in self.history_tree.selection():
@@ -483,6 +440,10 @@ class ListeningPlayer(tk.Tk):
     def show_player_view(self):
         self.initial_frame.pack_forget()
         self.player_frame.pack(expand=True, fill=tk.BOTH)
+        # --- MODIFICATION START ---
+        # 设置焦点到主窗口，以防止隐藏的按钮仍然响应键盘事件
+        self.focus_set()
+        # --- MODIFICATION END ---
 
     def back_to_home(self):
         self.finalize_current_audio_session()
@@ -494,7 +455,7 @@ class ListeningPlayer(tk.Tk):
         self.play_pause_btn.config(text="▶ 播放")
         self.progress_bar.set(0)
         self.time_label.config(text="00:00 / 00:00")
-        # Clear text widgets
+        
         self.prev_line_text.config(state=tk.NORMAL)
         self.prev_line_text.delete('1.0', tk.END)
         self.prev_line_text.config(state=tk.DISABLED)
@@ -506,6 +467,11 @@ class ListeningPlayer(tk.Tk):
         self.next_line_text.config(state=tk.NORMAL)
         self.next_line_text.delete('1.0', tk.END)
         self.next_line_text.config(state=tk.DISABLED)
+        
+        # --- MODIFICATION START ---
+        # 设置焦点到主窗口，以确保没有控件保持焦点
+        self.focus_set()
+        # --- MODIFICATION END ---
 
     def format_time(self, seconds):
         if seconds is None: return "00:00"
@@ -551,10 +517,7 @@ class ListeningPlayer(tk.Tk):
         self.update_initial_view_stats()
 
     def get_available_files(self):
-        """扫描音频和字幕文件夹，返回可用的文件列表"""
         available_files = []
-        
-        # 扫描音频文件夹
         try:
             if os.path.exists(self.audio_folder):
                 for filename in os.listdir(self.audio_folder):
@@ -563,7 +526,6 @@ class ListeningPlayer(tk.Tk):
                         audio_path = os.path.join(self.audio_folder, filename)
                         lrc_path = os.path.join(self.subtitle_folder, base_name + '.lrc')
                         
-                        # 检查是否存在对应的字幕文件
                         if os.path.exists(lrc_path):
                             available_files.append((base_name, audio_path, lrc_path))
         except Exception as e:
@@ -572,7 +534,6 @@ class ListeningPlayer(tk.Tk):
         return available_files
 
     def show_file_selection_dialog(self):
-        """显示文件选择对话框"""
         available_files = self.get_available_files()
         
         if not available_files:
@@ -584,106 +545,78 @@ class ListeningPlayer(tk.Tk):
                               "3. 音频和字幕文件名相同")
             return
         
-        # 创建选择对话框
         dialog = tk.Toplevel(self)
         dialog.title("选择音频文件")
         dialog.geometry("500x400")
         dialog.configure(bg=self.colors['bg'])
         dialog.resizable(False, False)
         
-        # 设置对话框为模态
         dialog.transient(self)
         dialog.grab_set()
         
-        # 居中显示
         dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
-        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        x = (self.winfo_rootx() + self.winfo_width() // 2) - (dialog.winfo_width() // 2)
+        y = (self.winfo_rooty() + self.winfo_height() // 2) - (dialog.winfo_height() // 2)
         dialog.geometry(f"+{x}+{y}")
         
-        # 标题
         title_label = tk.Label(dialog, text="请选择要播放的音频文件", 
                               font=("Segoe UI", 16), 
                               bg=self.colors['bg'], 
                               fg=self.colors['text_primary'])
         title_label.pack(pady=(20, 10))
         
-        # 文件列表
         list_frame = tk.Frame(dialog, bg=self.colors['bg'])
         list_frame.pack(expand=True, fill=tk.BOTH, padx=20, pady=(0, 20))
         
-        # 创建列表框
         listbox = tk.Listbox(list_frame, 
                             font=("Segoe UI", 12),
-                            bg=self.colors['bg'],
+                            bg=self.colors['bg_primary'],
                             fg=self.colors['text_primary'],
                             selectbackground=self.colors['bg_secondary'],
                             selectforeground=self.colors['text_primary'],
                             activestyle='none',
                             relief='flat',
-                            borderwidth=0)
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10,0))
+                            borderwidth=1,
+                            highlightthickness=0)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # 滚动条
-        scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         listbox.config(yscrollcommand=scrollbar.set)
         
-        # 填充文件列表
-        for base_name, audio_path, lrc_path in available_files:
+        for base_name, _, _ in available_files:
             listbox.insert(tk.END, base_name)
         
-        # 选中第一个文件
         if available_files:
             listbox.selection_set(0)
         
-        # 按钮区域
         button_frame = tk.Frame(dialog, bg=self.colors['bg'])
         button_frame.pack(fill=tk.X, padx=20, pady=20)
         
         def on_ok():
             selection = listbox.curselection()
             if selection:
-                index = selection[0]
-                base_name, audio_path, lrc_path = available_files[index]
+                _, audio_path, lrc_path = available_files[selection[0]]
                 dialog.destroy()
                 self.load_selected_files(audio_path, lrc_path)
         
         def on_cancel():
             dialog.destroy()
         
-        # 双击事件
         listbox.bind('<Double-1>', lambda e: on_ok())
         
-        # 确定按钮
-        ok_button = tk.Button(button_frame, text="确定", 
-                             command=on_ok,
-                             font=("Segoe UI", 10),
-                             bg=self.colors['bg_secondary'],
-                             fg=self.colors['text_primary'],
-                             relief='flat',
-                             padx=20, pady=6)
+        ok_button = ttk.Button(button_frame, text="确定", command=on_ok, style="Primary.TButton")
         ok_button.pack(side=tk.RIGHT, padx=(10, 0))
         
-        # 取消按钮
-        cancel_button = tk.Button(button_frame, text="取消", 
-                                 command=on_cancel,
-                                 font=("Segoe UI", 10),
-                                 bg=self.colors['bg_secondary'],
-                                 fg=self.colors['text_primary'],
-                                 relief='flat',
-                                 padx=20, pady=6)
+        cancel_button = ttk.Button(button_frame, text="取消", command=on_cancel)
         cancel_button.pack(side=tk.RIGHT)
         
-        # 设置回车键为确定
         dialog.bind('<Return>', lambda e: on_ok())
         dialog.bind('<Escape>', lambda e: on_cancel())
         
-        # 焦点设置
         listbox.focus_set()
     
     def load_selected_files(self, audio_path, lrc_path):
-        """加载选中的音频和字幕文件"""
         self.finalize_current_audio_session()
         
         try:
@@ -695,7 +628,6 @@ class ListeningPlayer(tk.Tk):
             messagebox.showerror("加载错误", f"加载文件时出错：\n{str(e)}")
     
     def load_files(self):
-        """主加载方法，显示文件选择对话框"""
         self.show_file_selection_dialog()
 
     def load_lrc(self, path):
@@ -811,7 +743,6 @@ class ListeningPlayer(tk.Tk):
             current_text = self.lyrics[self.current_line_index][1] if self.current_line_index != -1 else ""
             next_text = self.lyrics[self.current_line_index + 1][1] if self.current_line_index < len(self.lyrics) - 1 else ""
             
-            # Clear existing text
             self.prev_line_text.config(state=tk.NORMAL)
             self.prev_line_text.delete('1.0', tk.END)
             self.current_line_text.config(state=tk.NORMAL)
@@ -819,7 +750,6 @@ class ListeningPlayer(tk.Tk):
             self.next_line_text.config(state=tk.NORMAL)
             self.next_line_text.delete('1.0', tk.END)
             
-            # Insert text with center alignment for all lines
             self.prev_line_text.insert(tk.END, prev_text)
             self.prev_line_text.tag_add("centered", "1.0", tk.END)
             self.prev_line_text.config(state=tk.DISABLED)
@@ -869,13 +799,10 @@ class ListeningPlayer(tk.Tk):
                 messagebox.showerror("文件未找到", f"音频文件未找到：\n{audio_path}")
                 return
             
-            # 获取音频文件名（不含扩展名）
             audio_filename = os.path.splitext(os.path.basename(audio_path))[0]
             
-            # 首先在音频文件同目录下查找字幕文件
             lrc_path = os.path.splitext(audio_path)[0] + ".lrc"
             
-            # 如果同目录下没有找到，尝试在"字幕"文件夹中查找
             if not os.path.exists(lrc_path):
                 lrc_path = os.path.join(self.subtitle_folder, audio_filename + ".lrc")
                 
@@ -899,4 +826,3 @@ class ListeningPlayer(tk.Tk):
 if __name__ == "__main__":
     app = ListeningPlayer()
     app.mainloop()
-
