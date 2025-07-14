@@ -28,10 +28,10 @@ class ListeningPlayer(tk.Tk):
             
             if os.path.exists(self.ico_path):
                 self.iconbitmap(self.ico_path)
-            elif os.path.exists(self.png_path):
-                # 如果没有ico文件，使用png文件
+            if os.path.exists(self.png_path):
+                # 使用PNG文件
                 icon_photo = tk.PhotoImage(file=self.png_path)
-                self.iconphoto(False, icon_photo)
+                self.iconphoto(True, icon_photo)
         except Exception as e:
             print(f"无法加载图标: {e}")
             self.ico_path = None
