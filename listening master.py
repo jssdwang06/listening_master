@@ -11,7 +11,7 @@ class ListeningPlayer(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("听力大师")
-        self.geometry("1000x700")
+        self.geometry("1110x700")
         self.configure(bg='#fafafa')
         
         try:
@@ -65,6 +65,9 @@ class ListeningPlayer(tk.Tk):
         self.is_loaded = False
         self.seek_offset = 0.0
         
+        # --- NEW: State for sentence looping ---
+        self.is_looping_sentence = False
+
         # --- Session tracking ---
         self.current_audio_path = None
         self.current_session_db_id = None
@@ -180,7 +183,6 @@ class ListeningPlayer(tk.Tk):
                 with open(readme_path, 'w', encoding='utf-8') as f:
                     f.write("听力大师使用说明\n\n")
                     f.write("1. 请将音频文件(.mp3)放入'音频'文件夹中\n")
-                    # MODIFIED: 更新用户说明文件
                     f.write("2. 请将对应的字幕文件(.srt)放入'字幕'文件夹中\n")
                     f.write("3. 音频文件和字幕文件的文件名必须相同（扩展名不同）\n")
                     f.write("   例如：音频/song.mp3 和 字幕/song.srt\n\n")
@@ -194,7 +196,7 @@ class ListeningPlayer(tk.Tk):
                 
         except Exception as e:
             print(f"创建文件夹时出错: {e}")
-    # ... [中间的代码保持不变] ...
+
     def setup_key_bindings(self):
         """设置全局键盘绑定"""
         self.bind_all('<KeyPress-space>', self.global_space_handler)
@@ -208,7 +210,6 @@ class ListeningPlayer(tk.Tk):
         if self.is_loaded:
             self.toggle_play_pause()
         else:
-            # 在主页时，如果按空格，则尝试加载文件
             self.load_files()
         return "break" 
         
@@ -298,6 +299,9 @@ class ListeningPlayer(tk.Tk):
         self.destroy()
 
     def create_views(self):
+
+
+        
         font_main = "Segoe UI"
         self.initial_frame = ttk.Frame(self)
 
@@ -382,30 +386,46 @@ class ListeningPlayer(tk.Tk):
         self.time_label = ttk.Label(progress_container, text="00:00/00:00", font=(font_main, 11), foreground=self.colors['text_secondary'])
         self.time_label.pack(side=tk.RIGHT, padx=(10, 0))
         
+        # --- MODIFIED BUTTON LAYOUT ---
         buttons_container = ttk.Frame(bottom_controls_frame)
         buttons_container.pack(anchor="w")
 
         btn_prev_sent = ttk.Button(buttons_container, text="⏮️ 上一句", command=lambda: self.jump_to_sentence(-1), style="Control.TButton")
-        btn_prev_sent.pack(side=tk.LEFT, padx=(0, 10))
-        
+        btn_prev_sent.pack(side=tk.LEFT, padx=(0, 4))
+
         btn_rewind = ttk.Button(buttons_container, text="-5s", command=lambda: self.jump_time(-5), style="Control.TButton")
-        btn_rewind.pack(side=tk.LEFT)
-        
+        btn_rewind.pack(side=tk.LEFT, padx=(0, 4))
+
         self.play_pause_btn = ttk.Button(buttons_container, text="▶ 播放", width=10, command=self.toggle_play_pause, style="Control.TButton")
-        self.play_pause_btn.pack(side=tk.LEFT, padx=15)
-        
+        self.play_pause_btn.pack(side=tk.LEFT, padx=8) # 左右各8px间距，突出主按钮
+
         btn_forward = ttk.Button(buttons_container, text="+5s", command=lambda: self.jump_time(5), style="Control.TButton")
-        btn_forward.pack(side=tk.LEFT)
+        btn_forward.pack(side=tk.LEFT, padx=(0, 4))
 
         btn_next_sent = ttk.Button(buttons_container, text="下一句 ⏭️", command=lambda: self.jump_to_sentence(1), style="Control.TButton")
-        btn_next_sent.pack(side=tk.LEFT, padx=(10, 0))
-        
-        self.toggle_subtitles_btn = ttk.Button(buttons_container, text="隐藏字幕", command=self.toggle_subtitles, style="Control.TButton")
-        self.toggle_subtitles_btn.pack(side=tk.LEFT, padx=15)
-        
-        btn_home = ttk.Button(buttons_container, text="返回主页", command=self.back_to_home, style="Control.TButton")
-        btn_home.pack(side=tk.LEFT)
-    
+        btn_next_sent.pack(side=tk.LEFT, padx=(0, 10)) # 播放控制组结束，留出稍大空隙
+
+        # --- 功能按钮组 ---
+        self.sentence_loop_btn = ttk.Button(buttons_container, text="🔁 单句循环", command=self.toggle_sentence_loop, style="Control.TButton")
+        self.sentence_loop_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.toggle_subtitles_btn = ttk.Button(buttons_container, text="💬 隐藏字幕", command=self.toggle_subtitles, style="Control.TButton")
+        self.toggle_subtitles_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        btn_home = ttk.Button(buttons_container, text="🏠 返回主页", command=self.back_to_home, style="Control.TButton")
+        btn_home.pack(side=tk.LEFT) # 最后一个按钮右侧不需要间距
+    # --- NEW: Function to toggle sentence loop mode ---
+    def toggle_sentence_loop(self):
+        """切换单句循环模式"""
+        self.is_looping_sentence = not self.is_looping_sentence
+        if self.is_looping_sentence:
+            # 使用✓符号表示选中状态
+            self.sentence_loop_btn.config(text="✓ 单句循环")
+        else:
+            # 使用循环符号表示未选中
+            self.sentence_loop_btn.config(text="🔁 单句循环")
+        self.focus_set()
+
     def show_history_context_menu(self, event):
         item_id = self.history_tree.identify_row(event.y)
         if item_id:
@@ -422,14 +442,14 @@ class ListeningPlayer(tk.Tk):
 
     def show_subtitles(self):
         self.subtitles_visible = True
-        self.toggle_subtitles_btn.config(text="隐藏字幕")
+        self.toggle_subtitles_btn.config(text="💬 隐藏字幕")
         self.prev_line_text.pack(pady=10, fill='x')
         self.current_line_text.pack(pady=15, expand=True, fill='x')
         self.next_line_text.pack(pady=10, fill='x')
 
     def hide_subtitles(self):
         self.subtitles_visible = False
-        self.toggle_subtitles_btn.config(text="显示字幕")
+        self.toggle_subtitles_btn.config(text="📄 显示字幕")
         self.prev_line_text.pack_forget()
         self.current_line_text.pack_forget()
         self.next_line_text.pack_forget()
@@ -450,6 +470,11 @@ class ListeningPlayer(tk.Tk):
         self.is_paused = True
         self.is_loaded = False
         self.current_line_index = -1
+        
+        # --- MODIFIED: Reset loop state when going home ---
+        self.is_looping_sentence = False
+        self.sentence_loop_btn.config(text="🔁 单句循环")
+        
         self.show_initial_view()
         self.play_pause_btn.config(text="▶ 播放")
         self.progress_bar.set(0)
@@ -512,7 +537,6 @@ class ListeningPlayer(tk.Tk):
         self.db_conn.commit()
         self.update_initial_view_stats()
     
-    # MODIFIED: get_available_files 修改为查找 .srt
     def get_available_files(self):
         available_files = []
         try:
@@ -521,7 +545,6 @@ class ListeningPlayer(tk.Tk):
                     if filename.lower().endswith('.mp3'):
                         base_name = os.path.splitext(filename)[0]
                         audio_path = os.path.join(self.audio_folder, filename)
-                        # 修改: 查找 .srt 而不是 .lrc
                         srt_path = os.path.join(self.subtitle_folder, base_name + '.srt')
                         
                         if os.path.exists(srt_path):
@@ -539,28 +562,24 @@ class ListeningPlayer(tk.Tk):
                               "未找到可用的音频文件和字幕文件对。\n\n"
                               "请确保：\n"
                               "1. 将.mp3文件放入'音频'文件夹\n"
-                              "2. 将.srt文件放入'字幕'文件夹\n" # MODIFIED: 更新提示信息
+                              "2. 将.srt文件放入'字幕'文件夹\n"
                               "3. 音频和字幕文件名相同")
             return
         
-        # 计算对话框应该出现的位置
         dialog_width = 500
         dialog_height = 400
         x = (self.winfo_rootx() + self.winfo_width() // 2) - (dialog_width // 2)
         y = (self.winfo_rooty() + self.winfo_height() // 2) - (dialog_height // 2)
         
-        # 创建对话框时直接设置位置和大小，避免闪烁
         dialog = tk.Toplevel(self)
         dialog.title("选择音频文件")
         dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
         dialog.configure(bg=self.colors['bg'])
         dialog.resizable(False, False)
         
-        # 设置对话框属性
         dialog.transient(self)
         dialog.grab_set()
         
-        # 先隐藏对话框，等界面构建完成后再显示
         dialog.withdraw()
         
         title_label = tk.Label(dialog, text="请选择要播放的音频文件", 
@@ -600,7 +619,6 @@ class ListeningPlayer(tk.Tk):
         def on_ok():
             selection = listbox.curselection()
             if selection:
-                # MODIFIED: 变量名 lrc_path -> srt_path
                 _, audio_path, srt_path = available_files[selection[0]]
                 dialog.destroy()
                 self.load_selected_files(audio_path, srt_path)
@@ -621,22 +639,18 @@ class ListeningPlayer(tk.Tk):
         
         listbox.focus_set()
         
-        # 确保所有界面元素都已经构建完成后再显示对话框
         def show_dialog():
             dialog.update_idletasks()
             dialog.deiconify()
             dialog.lift()
             dialog.focus_force()
         
-        # 延迟显示对话框，确保没有闪烁
         dialog.after(10, show_dialog)
     
-    # MODIFIED: 变量名 lrc_path -> srt_path
     def load_selected_files(self, audio_path, srt_path):
         self.finalize_current_audio_session()
         
         try:
-            # MODIFIED: 调用 load_srt 而不是 load_lrc
             self.load_srt(srt_path)
             if self.load_audio(audio_path):
                 self.update_sentence_display()
@@ -647,7 +661,6 @@ class ListeningPlayer(tk.Tk):
     def load_files(self):
         self.show_file_selection_dialog()
 
-    # MODIFIED: 用 load_srt 替换 load_lrc
     def load_srt(self, path):
         """解析 SRT 字幕文件"""
         self.lyrics = []
@@ -661,19 +674,17 @@ class ListeningPlayer(tk.Tk):
             with open(path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # 使用正则表达式匹配SRT块，更稳健
             srt_pattern = re.compile(r'(\d+)\s*\n(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\s*\n(.*?)(?=\n\n|\Z)', re.S)
             matches = srt_pattern.finditer(content)
 
             for match in matches:
                 start_time_str = match.group(2)
-                text = match.group(4).strip().replace('\n', ' ') # 将多行字幕合并为一行
+                text = match.group(4).strip().replace('\n', ' ')
                 
                 time_in_seconds = srt_time_to_seconds(start_time_str)
                 self.lyrics.append((time_in_seconds, text))
 
         except Exception as e:
-            # 如果正则表达式失败，回退到简单的分割方法
             print(f"使用正则表达式解析SRT失败: {e}，尝试备用方法。")
             try:
                 blocks = content.strip().split('\n\n')
@@ -689,9 +700,6 @@ class ListeningPlayer(tk.Tk):
             except Exception as backup_e:
                 raise IOError(f"无法解析SRT文件: {path}\n主错误: {e}\n备用错误: {backup_e}")
     
-    # ... [下面的代码大部分保持不变] ...
-    
-    # MODIFIED: on_history_double_click 修改为查找 .srt
     def on_history_double_click(self, event):
         selected_items = self.history_tree.selection()
         if not selected_items: return
@@ -710,7 +718,6 @@ class ListeningPlayer(tk.Tk):
             
             audio_filename = os.path.splitext(os.path.basename(audio_path))[0]
             
-            # 修改: 尝试找到对应的 .srt 文件
             srt_path = os.path.splitext(audio_path)[0] + ".srt"
             
             if not os.path.exists(srt_path):
@@ -723,7 +730,6 @@ class ListeningPlayer(tk.Tk):
             self.finalize_current_audio_session()
             
             try:
-                # 修改: 调用 load_srt
                 self.load_srt(srt_path)
                 if self.load_audio(audio_path):
                     self.update_sentence_display()
@@ -765,31 +771,24 @@ class ListeningPlayer(tk.Tk):
             self.is_loaded = False
             return False
     
-    
     def toggle_play_pause(self):
         if not self.is_loaded: return
         
         if self.is_paused:
-            # --- MODIFICATION START / 修改开始 ---
             total_length = self.progress_bar.cget("to")
             current_pos = self.progress_bar.get()
 
-            # 检查音频是否已经播放完毕
-            # 如果是，则将播放位置重置到开头，实现“重播”功能
-            if current_pos >= total_length - 0.1: # 使用0.1秒作为容差，更稳定
+            if current_pos >= total_length - 0.1:
                 self.seek_offset = 0.0
                 self.progress_bar.set(0.0) 
             else:
-                # 否则，从当前暂停的位置继续播放
                 self.seek_offset = current_pos
-            # --- MODIFICATION END / 修改结束 ---
             
             pygame.mixer.music.play(start=self.seek_offset)
             self.play_pause_btn.config(text="⏸ 暂停")
             self.is_paused = False
             self.current_segment_start_time = datetime.datetime.now()
         else:
-            # 按下暂停的逻辑不需要改变
             if self.current_segment_start_time:
                 segment_duration = (datetime.datetime.now() - self.current_segment_start_time).total_seconds()
                 self.current_audio_accumulated_duration += segment_duration
@@ -800,10 +799,8 @@ class ListeningPlayer(tk.Tk):
             self.is_paused = True
             self.finalize_current_audio_session()
         
-        # 确保焦点在主窗口，防止空格键触发按钮
         self.focus_set()
 
-    
     def perform_seek(self, event):
         if not self.is_loaded: return
 
@@ -872,31 +869,49 @@ class ListeningPlayer(tk.Tk):
             self.next_line_text.insert(tk.END, next_text)
             self.next_line_text.tag_add("centered", "1.0", tk.END)
             self.next_line_text.config(state=tk.DISABLED)
-
+            
+    # --- MODIFIED: The core logic update function ---
     def update_player_state(self, force_update=False):
         if self.is_loaded:
             total_length = self.progress_bar.cget("to")
 
-            # --- MODIFICATION START / 修改开始 ---
-            # 优先处理音频自然播放结束的特殊情况
-            # 条件：程序状态为“播放中” (is_paused is False)，但Pygame混音器已经不“忙”了 (get_busy() is False)
-            if not self.is_paused and not pygame.mixer.music.get_busy():
-                
-                # 1. 强制将进度条设置到最大值
-                self.progress_bar.set(total_length)
-                
-                # 2. 更新时间标签，显示 "总时长 / 总时长"
-                self.time_label.config(text=f"{self.format_time(total_length)} / {self.format_time(total_length)}")
-                
-                # 3. 确保最后一句字幕正确显示
-                self.update_sentence_display()
+            # --- NEW: Check for sentence loop condition ---
+            # This block runs first to decide if a loop-jump is needed.
+            # Conditions: Playing, loop mode is on, we have lyrics and a valid sentence index.
+            if not self.is_paused and self.is_looping_sentence and self.current_line_index != -1 and self.lyrics:
+                current_time = self.seek_offset + (pygame.mixer.music.get_pos() / 1000.0)
 
-                # 4. 最后再处理状态变更和数据记录
+                # Determine the start time of the *next* sentence, which is the end of the current one.
+                is_last_sentence = (self.current_line_index == len(self.lyrics) - 1)
+                
+                # If it's the last sentence, the end time is the total audio length.
+                # Otherwise, it's the start time of the next sentence.
+                loop_end_time = total_length if is_last_sentence else self.lyrics[self.current_line_index + 1][0]
+                
+                # If the current time has passed the end of the sentence...
+                if current_time >= loop_end_time:
+                    # Get the start time of the current sentence to jump back to.
+                    loop_start_time = self.lyrics[self.current_line_index][0]
+                    self.progress_bar.set(loop_start_time)
+                    
+                    # Use perform_seek to correctly handle the jump.
+                    self.perform_seek(None) 
+                    
+                    # After initiating the jump, we exit this update cycle. The next cycle will
+                    # correctly reflect the new playback position.
+                    self.after(100, self.update_player_state)
+                    return
+
+            # --- Original logic continues below ---
+
+            if not self.is_paused and not pygame.mixer.music.get_busy():
+                self.progress_bar.set(total_length)
+                self.time_label.config(text=f"{self.format_time(total_length)} / {self.format_time(total_length)}")
+                self.update_sentence_display()
                 self.finalize_current_audio_session()
                 self.is_paused = True
                 self.play_pause_btn.config(text="▶ 播放")
-
-            # 如果音频正在播放，或者在暂停状态下需要强制刷新UI
+            
             elif not self.is_paused or force_update:
                 current_pos = 0
                 if pygame.mixer.music.get_busy():
@@ -904,19 +919,15 @@ class ListeningPlayer(tk.Tk):
                 
                 current_time = self.seek_offset + current_pos
                 
-                # 增加一个保护，防止时间超过总长
                 if current_time > total_length:
                     current_time = total_length
 
                 if not force_update:
                     self.progress_bar.set(current_time)
 
-                # 正常更新时间和字幕
                 self.time_label.config(text=f"{self.format_time(self.progress_bar.get())} / {self.format_time(total_length)}")
                 self.update_sentence_display()
-            # --- MODIFICATION END / 修改结束 ---
 
-        # 无论如何，都安排下一次检查
         self.after(100, self.update_player_state)
 
 if __name__ == "__main__":
