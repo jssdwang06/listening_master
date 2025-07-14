@@ -23,17 +23,19 @@ class ListeningPlayer(tk.Tk):
                     return os.path.join(sys._MEIPASS, relative_path)
                 return os.path.join(os.path.abspath('.'), relative_path)
             
-            ico_path = get_resource_path('listening_master_icon.ico')
-            png_path = get_resource_path('listening_master_icon.png')
+            self.ico_path = get_resource_path('listening_master_icon.ico')
+            self.png_path = get_resource_path('listening_master_icon.png')
             
-            if os.path.exists(ico_path):
-                self.iconbitmap(ico_path)
-            elif os.path.exists(png_path):
+            if os.path.exists(self.ico_path):
+                self.iconbitmap(self.ico_path)
+            elif os.path.exists(self.png_path):
                 # 如果没有ico文件，使用png文件
-                icon_photo = tk.PhotoImage(file=png_path)
+                icon_photo = tk.PhotoImage(file=self.png_path)
                 self.iconphoto(False, icon_photo)
         except Exception as e:
             print(f"无法加载图标: {e}")
+            self.ico_path = None
+            self.png_path = None
 
         # Modern color scheme
         self.colors = {
@@ -572,15 +574,32 @@ class ListeningPlayer(tk.Tk):
         y = (self.winfo_rooty() + self.winfo_height() // 2) - (dialog_height // 2)
         
         dialog = tk.Toplevel(self)
+        
+        # --- MODIFICATION START: The key to prevent flickering ---
+        
+        # 1. 先将窗口隐藏，后续操作在后台进行
+        dialog.withdraw()
+        
+        # --- END MODIFICATION ---
+
         dialog.title("选择音频文件")
+        
+        try:
+            if self.ico_path and os.path.exists(self.ico_path):
+                dialog.iconbitmap(self.ico_path)
+            elif self.png_path and os.path.exists(self.png_path):
+                dialog_icon_photo = tk.PhotoImage(file=self.png_path)
+                dialog.iconphoto(False, dialog_icon_photo)
+        except Exception as e:
+            print(f"无法为对话框设置图标: {e}")
+            
         dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
         dialog.configure(bg=self.colors['bg'])
         dialog.resizable(False, False)
         
+        # 让对话框成为主窗口的瞬态窗口，并捕获事件
         dialog.transient(self)
         dialog.grab_set()
-        
-        dialog.withdraw()
         
         title_label = tk.Label(dialog, text="请选择要播放的音频文件", 
                               font=("Segoe UI", 16), 
@@ -639,14 +658,15 @@ class ListeningPlayer(tk.Tk):
         
         listbox.focus_set()
         
-        def show_dialog():
-            dialog.update_idletasks()
-            dialog.deiconify()
-            dialog.lift()
-            dialog.focus_force()
-        
-        dialog.after(10, show_dialog)
-    
+        # --- MODIFICATION START: The key to prevent flickering ---
+
+        # 2. 所有内容都配置好后，再将窗口显示出来
+        dialog.deiconify()
+
+        # --- END MODIFICATION ---
+
+        # (原有的 dialog.lift() 和 dialog.focus_force() 在 deiconify() 和 grab_set() 后
+        # 通常是冗余的，但保留也无妨，这里为了代码简洁就移除了)
     def load_selected_files(self, audio_path, srt_path):
         self.finalize_current_audio_session()
         
