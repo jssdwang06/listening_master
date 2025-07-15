@@ -195,6 +195,7 @@ class ListeningPlayer(tk.Tk):
                     f.write("- 右箭头：下一句\n")
                     f.write("- 上箭头：显示字幕\n")
                     f.write("- 下箭头：隐藏字幕\n")
+                    f.write("- x：开启/关闭单句循环\n")
                 
         except Exception as e:
             print(f"创建文件夹时出错: {e}")
@@ -206,6 +207,7 @@ class ListeningPlayer(tk.Tk):
         self.bind_all('<KeyPress-Right>', self.global_right_handler)
         self.bind_all('<KeyPress-Up>', self.global_up_handler)
         self.bind_all('<KeyPress-Down>', self.global_down_handler)
+        self.bind_all('<KeyPress-x>', self.global_x_handler)
         
     def global_space_handler(self, event):
         """全局空格键处理器"""
@@ -237,6 +239,12 @@ class ListeningPlayer(tk.Tk):
         """全局下箭头处理器"""
         if self.is_loaded:
             self.hide_subtitles()
+        return "break"
+        
+    def global_x_handler(self, event):
+        """全局x键处理器"""
+        if self.is_loaded:
+            self.toggle_sentence_loop()
         return "break"
 
     def create_history_table(self):
