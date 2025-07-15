@@ -6,6 +6,8 @@ import sys
 import sqlite3
 import datetime
 import re # 解析SRT时间
+from activation_handler import check_license, RegistrationWindow
+
 
 class ListeningPlayer(tk.Tk):
     def __init__(self):
@@ -23,19 +25,15 @@ class ListeningPlayer(tk.Tk):
                     return os.path.join(sys._MEIPASS, relative_path)
                 return os.path.join(os.path.abspath('.'), relative_path)
             
-            self.ico_path = get_resource_path('listening_master_icon.ico')
-            self.png_path = get_resource_path('listening_master_icon.png')
+            self.ico_path = get_resource_path('icon.ico')
             
+            # 优先使用ICO文件设置图标
             if os.path.exists(self.ico_path):
                 self.iconbitmap(self.ico_path)
-            if os.path.exists(self.png_path):
-                # 使用PNG文件
-                icon_photo = tk.PhotoImage(file=self.png_path)
-                self.iconphoto(True, icon_photo)
+            
         except Exception as e:
             print(f"无法加载图标: {e}")
             self.ico_path = None
-            self.png_path = None
 
         # Modern color scheme
         self.colors = {
@@ -527,9 +525,9 @@ class ListeningPlayer(tk.Tk):
     def delete_selected_history(self):
         selected_items = self.history_tree.selection()
         if not selected_items:
-            messagebox.showinfo("删除历史", "没有选中的条目。")
+            messagebox.showinfo("删除历史", "没有选中的条目。", parent=self)
             return
-        if not messagebox.askyesno("确认删除", "您确定要删除选中的历史记录吗？"):
+        if not messagebox.askyesno("确认删除", "您确定要删除选中的历史记录吗？", parent=self):
             return
         cursor = self.db_conn.cursor()
         for item_id in selected_items:
@@ -540,7 +538,7 @@ class ListeningPlayer(tk.Tk):
         self.update_initial_view_stats()
 
     def clear_all_history(self):
-        if not messagebox.askyesno("清空所有历史", "您确定要清空所有历史记录吗？此操作不可撤销！"):
+        if not messagebox.askyesno("清空所有历史", "您确定要清空所有历史记录吗？此操作不可撤销！", parent=self):
             return
         cursor = self.db_conn.cursor()
         cursor.execute("DELETE FROM sessions")
@@ -573,7 +571,7 @@ class ListeningPlayer(tk.Tk):
                               "请确保：\n"
                               "1. 将.mp3文件放入'音频'文件夹\n"
                               "2. 将.srt文件放入'字幕'文件夹\n"
-                              "3. 音频和字幕文件名相同")
+                              "3. 音频和字幕文件名相同", parent=self)
             return
         
         dialog_width = 500
@@ -595,9 +593,6 @@ class ListeningPlayer(tk.Tk):
         try:
             if self.ico_path and os.path.exists(self.ico_path):
                 dialog.iconbitmap(self.ico_path)
-            elif self.png_path and os.path.exists(self.png_path):
-                dialog_icon_photo = tk.PhotoImage(file=self.png_path)
-                dialog.iconphoto(False, dialog_icon_photo)
         except Exception as e:
             print(f"无法为对话框设置图标: {e}")
             
@@ -684,7 +679,7 @@ class ListeningPlayer(tk.Tk):
                 self.update_sentence_display()
                 self.show_player_view()
         except Exception as e:
-            messagebox.showerror("加载错误", f"加载文件时出错：\n{str(e)}")
+            messagebox.showerror("加载错误", f"加载文件时出错：\n{str(e)}", parent=self)
     
     def load_files(self):
         self.show_file_selection_dialog()
@@ -959,5 +954,21 @@ class ListeningPlayer(tk.Tk):
         self.after(100, self.update_player_state)
 
 if __name__ == "__main__":
-    app = ListeningPlayer()
-    app.mainloop()
+    # 1. Check license
+    if check_license():
+        app = ListeningPlayer()
+        app.mainloop()
+    else:
+        root = tk.Tk()
+        root.withdraw()
+
+        reg_window = RegistrationWindow()
+        root.wait_window(reg_window)
+
+        if reg_window.activated:
+            root.destroy()
+            app = ListeningPlayer()
+            app.mainloop()
+        else:
+            root.destroy()
+            sys.exit()
