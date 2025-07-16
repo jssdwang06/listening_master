@@ -15,6 +15,7 @@ class ListeningPlayer(tk.Tk):
         self.title("听力大师")
         self.geometry("1110x700")
         self.configure(bg='#fafafa')
+        self._update_job = None 
         
         try:
             # 支持PyInstaller打包后的资源路径
@@ -87,7 +88,7 @@ class ListeningPlayer(tk.Tk):
         self.show_initial_view()
         
         # --- Main loop and closing protocol ---
-        self.update_player_state()
+        # self.update_player_state()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         # --- Keyboard Bindings ---
@@ -306,10 +307,7 @@ class ListeningPlayer(tk.Tk):
         self.db_conn.close()
         self.destroy()
 
-    def create_views(self):
-
-
-        
+    def create_views(self):       
         font_main = "Segoe UI"
         self.initial_frame = ttk.Frame(self)
 
@@ -385,7 +383,7 @@ class ListeningPlayer(tk.Tk):
         bottom_controls_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 15),padx=40)
 
         progress_container = ttk.Frame(bottom_controls_frame)
-        progress_container.pack(fill=tk.X, expand=True, pady=(0, 5))
+        progress_container.pack(fill=tk.X, expand=True, pady=(0, 5), padx=(40, 40))
 
         self.progress_bar = ttk.Scale(progress_container, from_=0, to=100, orient=tk.HORIZONTAL, style="Custom.Horizontal.TScale")
         self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -422,6 +420,7 @@ class ListeningPlayer(tk.Tk):
 
         btn_home = ttk.Button(buttons_container, text="🏠 返回主页", command=self.back_to_home, style="Control.TButton")
         btn_home.pack(side=tk.LEFT) # 最后一个按钮右侧不需要间距
+
     # --- NEW: Function to toggle sentence loop mode ---
     def toggle_sentence_loop(self):
         """切换单句循环模式"""
@@ -471,14 +470,19 @@ class ListeningPlayer(tk.Tk):
         self.initial_frame.pack_forget()
         self.player_frame.pack(expand=True, fill=tk.BOTH)
         self.focus_set()
+        self.update_player_state()
 
     def back_to_home(self):
+        if self._update_job:
+            self.after_cancel(self._update_job)
+            self._update_job = None
+        
         self.finalize_current_audio_session()
         pygame.mixer.music.stop()
         self.is_paused = True
         self.is_loaded = False
         self.current_line_index = -1
-        
+
         # --- MODIFIED: Reset loop state when going home ---
         self.is_looping_sentence = False
         self.sentence_loop_btn.config(text="🔁 单句循环")
@@ -586,8 +590,6 @@ class ListeningPlayer(tk.Tk):
         # 1. 先将窗口隐藏，后续操作在后台进行
         dialog.withdraw()
         
-        # --- END MODIFICATION ---
-
         dialog.title("选择音频文件")
         
         try:
@@ -661,15 +663,9 @@ class ListeningPlayer(tk.Tk):
         
         listbox.focus_set()
         
-        # --- MODIFICATION START: The key to prevent flickering ---
-
         # 2. 所有内容都配置好后，再将窗口显示出来
         dialog.deiconify()
 
-        # --- END MODIFICATION ---
-
-        # (原有的 dialog.lift() 和 dialog.focus_force() 在 deiconify() 和 grab_set() 后
-        # 通常是冗余的，但保留也无妨，这里为了代码简洁就移除了)
     def load_selected_files(self, audio_path, srt_path):
         self.finalize_current_audio_session()
         
@@ -922,10 +918,9 @@ class ListeningPlayer(tk.Tk):
                     
                     # After initiating the jump, we exit this update cycle. The next cycle will
                     # correctly reflect the new playback position.
-                    self.after(100, self.update_player_state)
-                    return
-
-            # --- Original logic continues below ---
+                    # self.after(100, self.update_player_state)
+                    # self._update_job = self.after(100, self.update_player_state)
+                    # return
 
             if not self.is_paused and not pygame.mixer.music.get_busy():
                 self.progress_bar.set(total_length)
@@ -951,7 +946,7 @@ class ListeningPlayer(tk.Tk):
                 self.time_label.config(text=f"{self.format_time(self.progress_bar.get())} / {self.format_time(total_length)}")
                 self.update_sentence_display()
 
-        self.after(100, self.update_player_state)
+        self._update_job = self.after(100, self.update_player_state)
 
 if __name__ == "__main__":
     # 1. Check license
