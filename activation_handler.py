@@ -33,7 +33,7 @@ def get_machine_id():
     try:
         if sys.platform == 'win32':
             command = "wmic cpu get processorid"
-            result = subprocess.check_output(command, shell=True, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+            result = subprocess.check_output(command, shell=True, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
             cpu_id = result.decode().split('\n')[1].strip()
         else:
             command = "cat /proc/cpuinfo | grep 'Serial' | cut -d ' ' -f 2"
@@ -91,16 +91,28 @@ def save_license(key):
         messagebox.showerror("保存失败", f"无法写入许可证文件: {e}")
         return False
 
-class RegistrationWindow(Toplevel):
-    def __init__(self):
+class RegistrationWindow(tk.Tk):
+    def __init__(self, parent=None):
         super().__init__()
+        
+        # 先隐藏窗口，避免初始化时的闪烁
+        self.withdraw()
+        
         self.activated = False
         self.machine_id = get_machine_id()
         
         self.title("软件激活")
-        self.geometry("450x280")
         self.resizable(False, False)
         self.configure(bg='#f0f0f0')
+        
+        # 居中显示窗口
+        window_width = 450
+        window_height = 280
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = (screen_width // 2) - (window_width // 2)
+        y = (screen_height // 2) - (window_height // 2)
+        self.geometry(f"{window_width}x{window_height}+{x}+{y}")
         
         # 设置图标
         try:
@@ -108,11 +120,13 @@ class RegistrationWindow(Toplevel):
             if os.path.exists(ico_path):
                 self.iconbitmap(ico_path)
         except Exception as e:
-            print(f"无法为激活窗口设置图标: {e}")
+            # 静默处理图标设置失败，避免控制台输出
+            pass
         
+        # 设置窗口属性
         self.grab_set()
+        
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.transient()
 
         main_frame = Frame(self, padx=20, pady=20, bg='#f0f0f0')
         main_frame.pack(expand=True, fill=tk.BOTH)
@@ -156,6 +170,18 @@ class RegistrationWindow(Toplevel):
         self.status_label.pack(pady=(5,0), fill=tk.X)
 
         self.key_entry.focus_set()
+        
+        # 绑定回车键激活
+        self.key_entry.bind('<Return>', lambda e: self.activate())
+        self.bind('<Return>', lambda e: self.activate())
+        
+        # 所有UI元素创建完成后，显示窗口
+        self.deiconify()
+        
+        # 确保窗口在最前面
+        self.lift()
+        self.attributes('-topmost', True)
+        self.after(100, lambda: self.attributes('-topmost', False))
 
     def copy_id(self):
         self.clipboard_clear()
@@ -188,7 +214,5 @@ class RegistrationWindow(Toplevel):
 
 # 如果直接运行此文件，可以用于测试窗口
 if __name__ == "__main__":
-    root = tk.Tk()
-    root.withdraw()
     app = RegistrationWindow()
     app.mainloop()
