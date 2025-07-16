@@ -12,10 +12,20 @@ from activation_handler import check_license, RegistrationWindow
 class ListeningPlayer(tk.Tk):
     def __init__(self):
         super().__init__()
+
+        # 先隐藏窗口，避免闪烁
+        self.withdraw()
+
         self.title("听力大师")
-        self.geometry("1110x700")
+        
+        # 设置窗口自适应
+        self.setup_window_responsive()
+
         self.configure(bg='#fafafa')
-        self._update_job = None 
+        self._update_job = None
+
+        # 窗口大小变化监听
+        self.bind('<Configure>', self.on_window_resize)
         
         try:
             # 支持PyInstaller打包后的资源路径
@@ -87,12 +97,18 @@ class ListeningPlayer(tk.Tk):
         self.create_views()
         self.show_initial_view()
         
+        # --- 初始化字体调整 ---
+        self.after(100, self.adjust_font_sizes)
+
         # --- Main loop and closing protocol ---
         # self.update_player_state()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         # --- Keyboard Bindings ---
         self.focus_set()
+
+        # 所有初始化完成后显示窗口
+        self.deiconify()
     
     def setup_styles(self):
         """Configure ttk styles for better appearance"""
@@ -162,6 +178,231 @@ class ListeningPlayer(tk.Tk):
                        sliderlength=15,
                        relief='flat')
         style.map("Custom.Horizontal.TScale", troughcolor=[('active', self.colors['border'])])
+
+    def setup_window_responsive(self):
+        """设置窗口自适应功能"""
+        # 获取屏幕尺寸
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        
+        # 默认窗口大小
+        default_width = 1200
+        default_height = 800
+        
+        # 计算自适应大小（不超过屏幕的80%）
+        max_width = int(screen_width * 0.8)
+        max_height = int(screen_height * 0.8)
+        
+        # 选择合适的窗口大小
+        window_width = min(default_width, max_width)
+        window_height = min(default_height, max_height)
+        
+        # 计算窗口居中位置
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        
+        # 设置窗口大小和位置
+        self.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        
+        # 设置最小窗口大小（根据屏幕大小自适应）
+        min_width = min(900, int(screen_width * 0.6))
+        min_height = min(600, int(screen_height * 0.6))
+        self.minsize(min_width, min_height)
+        
+        # 存储窗口尺寸信息用于后续调整
+        self.window_info = {
+            'screen_width': screen_width,
+            'screen_height': screen_height,
+            'default_width': default_width,
+            'default_height': default_height,
+            'current_width': window_width,
+            'current_height': window_height
+        }
+    
+    def on_window_resize(self, event):
+        """窗口大小变化时的处理"""
+        # 只处理主窗口的resize事件
+        if event.widget == self:
+            # 更新当前窗口大小信息
+            self.window_info['current_width'] = event.width
+            self.window_info['current_height'] = event.height
+            
+            # 根据窗口大小调整字体大小
+            self.adjust_font_sizes()
+    
+    def adjust_font_sizes(self):
+        """根据窗口大小调整字体大小"""
+        try:
+            current_width = self.window_info['current_width']
+            current_height = self.window_info['current_height']
+            default_width = self.window_info['default_width']
+            default_height = self.window_info['default_height']
+            
+            # 计算缩放比例
+            width_ratio = current_width / default_width
+            height_ratio = current_height / default_height
+            scale_ratio = min(width_ratio, height_ratio)
+            
+            # 限制缩放比例在合理范围内
+            scale_ratio = max(0.8, min(1.3, scale_ratio))
+            
+            # 根据缩放比例调整字体大小
+            base_font_size = 20
+            scaled_font_size = int(base_font_size * scale_ratio)
+            
+            # 更新当前行字幕的字体大小
+            if hasattr(self, 'current_line_text'):
+                self.current_line_text.config(font=("Segoe UI", scaled_font_size))
+            
+            # 更新上一行和下一行字幕的字体大小
+            secondary_font_size = int(12 * scale_ratio)
+            if hasattr(self, 'prev_line_text'):
+                self.prev_line_text.config(font=("Segoe UI", secondary_font_size))
+            if hasattr(self, 'next_line_text'):
+                self.next_line_text.config(font=("Segoe UI", secondary_font_size))
+            
+            # 更新标题字体大小
+            title_font_size = int(22 * scale_ratio)
+            if hasattr(self, 'initial_frame'):
+                # 查找并更新标题标签
+                for widget in self.initial_frame.winfo_children():
+                    if isinstance(widget, ttk.Frame):
+                        for child in widget.winfo_children():
+                            if isinstance(child, ttk.Label):
+                                try:
+                                    current_font_info = child.cget('font')
+                                    # In case the font is a string, we can't do much
+                                    if isinstance(current_font_info, str):
+                                        continue
+
+                                    current_font = list(current_font_info)
+                                    if len(current_font) >= 3:
+                                        if 'bold' in current_font[2]:
+                                            child.config(font=("Segoe UI", title_font_size, "bold"))
+                                        else:
+                                            subtitle_font_size = int(14 * scale_ratio)
+                                            child.config(font=("Segoe UI", subtitle_font_size))
+                                except tk.TclError:
+                                    pass
+            
+            # 更新按钮字体大小和尺寸
+            button_font_size = int(11 * scale_ratio)
+            if hasattr(self, 'player_frame'):
+                # 更新播放器页面的按钮字体和尺寸
+                self.update_buttons_font_size(self.player_frame, button_font_size)
+                self.update_player_buttons_layout(scale_ratio)
+            
+            if hasattr(self, 'initial_frame'):
+                # 更新初始页面的按钮字体
+                self.update_buttons_font_size(self.initial_frame, button_font_size)
+            
+            # 更新时间标签字体大小
+            time_font_size = int(11 * scale_ratio)
+            if hasattr(self, 'time_label'):
+                self.time_label.config(font=("Segoe UI", time_font_size))
+            
+            # 更新历史记录相关的字体大小
+            history_font_size = int(18 * scale_ratio)
+            history_sub_font_size = int(11 * scale_ratio)
+            if hasattr(self, 'history_tree'):
+                # 更新历史记录树的字体
+                style = ttk.Style()
+                style.configure("Custom.Treeview", font=("Segoe UI", int(10 * scale_ratio)))
+                style.configure("Custom.Treeview.Heading", font=("Segoe UI", int(11 * scale_ratio), 'bold'))
+                        
+        except Exception as e:
+            # 如果调整字体时出错，静默处理
+            pass
+    
+    def update_buttons_font_size(self, parent, font_size):
+        """递归更新所有按钮的字体大小"""
+        try:
+            for widget in parent.winfo_children():
+                if isinstance(widget, ttk.Button):
+                    try:
+                        current_font_info = widget.cget('font')
+                        if isinstance(current_font_info, str):
+                           continue
+
+                        current_font = list(current_font_info)
+                        
+                        if len(current_font) >= 3:
+                            if 'bold' in current_font[2]:
+                                widget.config(font=("Segoe UI", font_size, "bold"))
+                            else:
+                                widget.config(font=("Segoe UI", font_size))
+                        else:
+                            widget.config(font=("Segoe UI", font_size))
+                    except tk.TclError:
+                        pass
+                elif isinstance(widget, (ttk.Frame, tk.Frame)):
+                    # 递归处理子框架
+                    self.update_buttons_font_size(widget, font_size)
+        except Exception as e:
+            # 如果更新按钮字体时出错，静默处理
+            pass
+    
+    def update_player_buttons_layout(self, scale_ratio):
+        """更新播放界面按钮的布局和尺寸"""
+        try:
+            # 根据缩放比例调整按钮内边距
+            base_padding = 12
+            scaled_padding = int(base_padding * scale_ratio)
+            
+            # 根据缩放比例调整主按钮宽度
+            base_width = 10
+            scaled_width = int(base_width * scale_ratio)
+            
+            # 更新TTK样式以适应新的尺寸
+            style = ttk.Style()
+            style.configure("Control.TButton", padding=(scaled_padding, int(scaled_padding * 0.67)))
+            
+            # 更新各个按钮的配置
+            if hasattr(self, 'play_pause_btn'):
+                self.play_pause_btn.config(width=scaled_width)
+            
+            # 更新进度条容器的内边距
+            if hasattr(self, 'progress_bar') and self.progress_bar.master:
+                progress_container = self.progress_bar.master
+                base_padx_left = 30
+                base_padx_right = 60
+                scaled_padx_left = int(base_padx_left * scale_ratio)
+                scaled_padx_right = int(base_padx_right * scale_ratio)
+                
+                try:
+                    progress_container.pack_configure(padx=(scaled_padx_left, scaled_padx_right))
+                except:
+                    pass
+            
+            # 更新底部控制面板的内边距
+            if hasattr(self, 'player_frame'):
+                for widget in self.player_frame.winfo_children():
+                    if isinstance(widget, ttk.Frame):
+                        # 查找底部控制面板
+                        try:
+                            pack_info = widget.pack_info()
+                            if pack_info.get('side') == 'bottom':
+                                base_padx_bottom = 40
+                                scaled_padx_bottom = int(base_padx_bottom * scale_ratio)
+                                widget.pack_configure(padx=scaled_padx_bottom)
+                                break
+                        except tk.TclError:
+                            pass
+            
+            # 更新文本框架的内边距
+            if hasattr(self, 'current_line_text'):
+                text_frame = self.current_line_text.master
+                if text_frame:
+                    base_text_padding = 40
+                    scaled_text_padding = int(base_text_padding * scale_ratio)
+                    try:
+                        text_frame.pack_configure(padx=scaled_text_padding, pady=scaled_text_padding)
+                    except tk.TclError:
+                        pass
+            
+        except Exception as e:
+            # 如果更新布局时出错，静默处理
+            pass
 
     def create_folders(self):
         """创建音频和字幕文件夹"""
@@ -394,7 +635,8 @@ class ListeningPlayer(tk.Tk):
         
         # --- MODIFIED BUTTON LAYOUT ---
         buttons_container = ttk.Frame(bottom_controls_frame)
-        buttons_container.pack(anchor="w")
+        # 将按钮容器居中显示，参照 v2 版本
+        buttons_container.pack(anchor="center")
 
         btn_prev_sent = ttk.Button(buttons_container, text="⏮️ 上一句", command=lambda: self.jump_to_sentence(-1), style="Control.TButton")
         btn_prev_sent.pack(side=tk.LEFT, padx=(0, 4))
