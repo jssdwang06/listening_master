@@ -10,6 +10,9 @@ from activation_handler import check_license, RegistrationWindow
 import subprocess
 from pydub import AudioSegment
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import queue
 
 
 def check_ffmpeg_availability():
@@ -158,6 +161,12 @@ class ListeningPlayer(tk.Tk):
         self.current_loop_duration = 0.0  # 当前循环片段时长
         self.current_loop_start_time = 0.0  # 当前循环开始时间
         self.current_loop_end_time = 0.0  # 当前循环结束时间
+        
+        # --- 异步处理相关 ---
+        self.thread_pool = ThreadPoolExecutor(max_workers=2)  # 限制线程数量
+        self.processing_queue = queue.Queue()  # 用于线程间通信
+        self.is_processing_audio = False  # 标记是否正在处理音频
+        self.pending_sentence_change = False  # 标记是否有待处理的句子切换
 
         # --- Session tracking ---
         self.current_audio_path = None
@@ -637,6 +646,9 @@ class ListeningPlayer(tk.Tk):
 
     def on_closing(self):
         self.finalize_current_audio_session()
+        # 关闭线程池
+        if hasattr(self, 'thread_pool'):
+            self.thread_pool.shutdown(wait=False)
         self.db_conn.close()
         self.destroy()
 
@@ -711,6 +723,14 @@ class ListeningPlayer(tk.Tk):
         self.next_line_text.tag_configure("centered", justify="center")
 
         self.subtitles_visible = True
+        
+        # 为文本框架添加双击事件监听
+        text_frame.bind("<Double-Button-1>", self.on_text_frame_double_click)
+        
+        # 为所有文本控件添加双击事件监听
+        self.prev_line_text.bind("<Double-Button-1>", self.on_text_frame_double_click)
+        self.current_line_text.bind("<Double-Button-1>", self.on_text_frame_double_click)
+        self.next_line_text.bind("<Double-Button-1>", self.on_text_frame_double_click)
 
         bottom_controls_frame = ttk.Frame(self.player_frame)
         bottom_controls_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 15),padx=40)
@@ -732,14 +752,8 @@ class ListeningPlayer(tk.Tk):
         btn_prev_sent = ttk.Button(buttons_container, text="⏮️ 上一句", command=lambda: self.jump_to_sentence(-1), style="Control.TButton")
         btn_prev_sent.pack(side=tk.LEFT, padx=(0, 2))
 
-        btn_rewind = ttk.Button(buttons_container, text="-5s", command=lambda: self.jump_time(-5), style="Control.TButton")
-        btn_rewind.pack(side=tk.LEFT, padx=(0, 2))
-
         self.play_pause_btn = ttk.Button(buttons_container, text="▶ 播放", width=10, command=self.toggle_play_pause, style="Control.TButton")
         self.play_pause_btn.pack(side=tk.LEFT, padx=4) # 左右各4px间距，突出主按钮
-
-        btn_forward = ttk.Button(buttons_container, text="+5s", command=lambda: self.jump_time(5), style="Control.TButton")
-        btn_forward.pack(side=tk.LEFT, padx=(0, 2))
 
         btn_next_sent = ttk.Button(buttons_container, text="下一句 ⏭️", command=lambda: self.jump_to_sentence(1), style="Control.TButton")
         btn_next_sent.pack(side=tk.LEFT, padx=(0, 6)) # 播放控制组结束，留出稍大空隙
@@ -769,23 +783,50 @@ class ListeningPlayer(tk.Tk):
             self.playback_speed = 1.0
         # 切换倍速时，若在单句循环且正在播放，立即重播当前句子
         if self.is_looping_sentence and self.is_loaded:
-            self.play_current_sentence_with_speed()
+            self.play_current_sentence_with_speed_async()
 
     def toggle_sentence_loop(self):
+        # 检查是否已经加载音频
+        if not self.is_loaded:
+            messagebox.showinfo("提示", "请先加载音频文件再使用单句循环功能。", parent=self)
+            return
+        
+        # 检查是否在播放状态，如果未播放则提示用户先播放
+        if self.is_paused and not self.is_looping_sentence:
+            messagebox.showinfo("提示", "请先点击播放按钮开始播放，然后再启用单句循环功能。", parent=self)
+            return
+        
         self.is_looping_sentence = not self.is_looping_sentence
         if self.is_looping_sentence:
+            # 启用单句循环模式
             self.sentence_loop_btn.config(text="✓ 单句循环")
             self.speed_combobox.configure(state="readonly")  # 启用倍速选择
-            self.play_current_sentence_with_speed()
+            
+            # 如果当前没有有效的句子索引，设置为第一个句子
+            if self.current_line_index == -1 and self.lyrics:
+                self.current_line_index = 0
+            
+            # 获取当前播放位置，相对于当前句子的开始时间
+            current_pos = pygame.mixer.music.get_pos() / 1000.0
+            sentence_start_time = self.lyrics[self.current_line_index][0] if self.current_line_index != -1 else 0
+            absolute_current_time = self.seek_offset + current_pos
+            loop_offset = max(0, absolute_current_time - sentence_start_time)
+            
+            # 异步处理音频，并将当前播放位置作为偏移量开始播放
+            self.play_current_sentence_with_speed_async(offset=loop_offset)
         else:
+            # 关闭单句循环模式
             self.sentence_loop_btn.config(text="🔁 单句循环")
             self.speed_combobox.configure(state="disabled")  # 禁用倍速选择
             self.stop_simpleaudio_playback()
+            
             # 清理循环相关的属性
             self.loop_play_start_time = None
             self.current_loop_duration = 0.0
             self.current_loop_start_time = 0.0
             self.current_loop_end_time = 0.0
+            self.is_processing_audio = False
+            self.pending_sentence_change = False
             
             # 重新加载原始音频文件
             try:
@@ -799,7 +840,7 @@ class ListeningPlayer(tk.Tk):
             self.progress_bar.config(to=self.current_audio_total_length)
             self.progress_bar.set(self.seek_offset)
             
-            # 恢复pygame正常播放
+            # 恢复pygame正常播放（如果之前在播放状态）
             if not self.is_paused:
                 pygame.mixer.music.play(start=self.seek_offset)
                 # print(f"[DEBUG] 恢复正常播放，从 {self.seek_offset} 秒开始")
@@ -818,41 +859,127 @@ class ListeningPlayer(tk.Tk):
                 pass
             self.temp_wav_path = None
 
-    def play_current_sentence_with_speed(self):
+    def play_current_sentence_with_speed_async(self, offset=0):
+        """异步处理音频变速并播放"""
+        if self.is_processing_audio:
+            # 如果正在处理音频，标记有待处理的句子切换
+            self.pending_sentence_change = True
+            return
+        
+        # 获取当前句子的起止时间
+        if not self.lyrics or self.current_line_index == -1:
+            return
+        
+        start_time = self.lyrics[self.current_line_index][0] + offset
+        if self.current_line_index < len(self.lyrics) - 1:
+            end_time = self.lyrics[self.current_line_index + 1][0]
+        else:
+            end_time = self.current_audio_total_length
+        
+        # 立即停止当前播放
+        pygame.mixer.music.pause()
+        self.stop_simpleaudio_playback()
+        
+        # 标记正在处理
+        self.is_processing_audio = True
+        
+        # 提交到线程池异步处理
+        future = self.thread_pool.submit(
+            self.process_audio_segment,
+            self.current_audio_path,
+            start_time,
+            end_time,
+            self.playback_speed
+        )
+        
+        # 设置回调处理结果
+        future.add_done_callback(self.on_audio_processed)
+    
+    def process_audio_segment(self, input_path, start_time, end_time, speed):
+        """在后台线程中处理音频片段"""
         try:
-            # print("[DEBUG] play_current_sentence_with_speed: 开始")
-            # 停止pygame播放
-            pygame.mixer.music.pause()
-            # print("[DEBUG] pygame.mixer.music.pause() 完成")
-            self.stop_simpleaudio_playback()
-            # print("[DEBUG] stop_simpleaudio_playback 完成")
-            # 获取当前句子的起止时间
-            if not self.lyrics or self.current_line_index == -1:
-                # print("[DEBUG] 没有歌词或current_line_index无效")
-                return
-            start_time = self.lyrics[self.current_line_index][0]
-            if self.current_line_index < len(self.lyrics) - 1:
-                end_time = self.lyrics[self.current_line_index + 1][0]
-            else:
-                end_time = self.current_audio_total_length
-            # print(f"[DEBUG] 当前句子起止时间: {start_time} - {end_time}, 倍速: {self.playback_speed}")
-            # 生成变速音频片段
-            seg = self.change_speed_ffmpeg(self.current_audio_path, start_time, end_time, self.playback_speed)
-            # print("[DEBUG] change_speed_ffmpeg 完成")
-            # 记录当前循环片段的变速后时长
-            self.current_loop_duration = seg.duration_seconds
-            self.current_loop_start_time = start_time
-            self.current_loop_end_time = end_time
-            # 播放
-            self.playback_obj = self.play_audiosegment(seg)
-            # print("[DEBUG] play_audiosegment 完成")
-            # 设置进度条最大值为当前片段长度
-            self.progress_bar.config(to=self.current_loop_duration)
-            self.progress_bar.set(0)
-            # 记录手动计时起点
-            self.loop_play_start_time = time.time()
+            seg = self.change_speed_ffmpeg(input_path, start_time, end_time, speed)
+            return {
+                'success': True,
+                'segment': seg,
+                'duration': seg.duration_seconds,
+                'start_time': start_time,
+                'end_time': end_time
+            }
         except Exception as e:
-            # print(f"[DEBUG] play_current_sentence_with_speed 异常: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def on_audio_processed(self, future):
+        """音频处理完成后的回调函数"""
+        try:
+            result = future.result()
+            # 将结果放入队列，由主线程处理
+            self.processing_queue.put(result)
+            # 使用after方法确保在主线程中处理结果
+            self.after_idle(self.handle_processed_audio)
+        except Exception as e:
+            # 处理异常
+            self.processing_queue.put({
+                'success': False,
+                'error': str(e)
+            })
+            self.after_idle(self.handle_processed_audio)
+    
+    def handle_processed_audio(self):
+        """在主线程中处理音频处理结果"""
+        try:
+            if not self.processing_queue.empty():
+                result = self.processing_queue.get_nowait()
+                
+                if result['success']:
+                    # 成功处理音频
+                    seg = result['segment']
+                    self.current_loop_duration = result['duration']
+                    self.current_loop_start_time = result['start_time']
+                    self.current_loop_end_time = result['end_time']
+                    
+                    # 播放音频
+                    self.playback_obj = self.play_audiosegment(seg)
+                    
+                    # 设置进度条
+                    self.progress_bar.config(to=self.current_loop_duration)
+                    self.progress_bar.set(0)
+                    
+                    # 记录播放开始时间
+                    self.loop_play_start_time = time.time()
+                else:
+                    # 处理失败，显示错误信息
+                    self.show_audio_processing_error(result['error'])
+                
+                # 重置处理状态
+                self.is_processing_audio = False
+                
+                # 检查是否有待处理的句子切换
+                if self.pending_sentence_change and self.is_looping_sentence:
+                    self.pending_sentence_change = False
+                    self.play_current_sentence_with_speed_async()
+                    
+        except queue.Empty:
+            pass
+        except Exception as e:
+            self.is_processing_audio = False
+            self.show_audio_processing_error(str(e))
+    
+    def show_audio_processing_error(self, error_msg):
+        """显示音频处理错误（非阻塞）"""
+        # 使用after方法延迟显示错误，避免阻塞
+        self.after(100, lambda: self.display_error_message(error_msg))
+    
+    def display_error_message(self, error_msg):
+        """显示错误消息"""
+        try:
+            simplified_msg = f"音频处理失败，请检查文件或重启程序。\n\n详细错误：{error_msg[:200]}..."
+            messagebox.showerror("音频处理错误", simplified_msg, parent=self)
+        except Exception:
+            # 如果连错误显示都失败了，就静默处理
             pass
 
     def change_speed_ffmpeg(self, input_path, start_time, end_time, speed):
@@ -1414,7 +1541,30 @@ class ListeningPlayer(tk.Tk):
         self.progress_bar.set(new_time)
         self.perform_seek(None)
         self.focus_set()
-
+    
+    def on_text_frame_double_click(self, event):
+        """处理文本框架双击事件，根据点击位置决定跳跃方向"""
+        if not self.is_loaded:
+            return
+        
+        # 获取事件的widget和坐标
+        widget = event.widget
+        click_x = event.x
+        
+        # 获取控件的宽度
+        widget_width = widget.winfo_width()
+        
+        # 判断点击位置：左半部分快退，右半部分快进
+        if click_x < widget_width / 2:
+            # 双击左侧 - 快退5秒
+            self.jump_time(-5)
+        else:
+            # 双击右侧 - 快进5秒
+            self.jump_time(5)
+        
+        # 确保焦点回到主窗口
+        self.focus_set()
+    
     def jump_to_sentence(self, direction):
         if not self.lyrics: return
         target_index = self.current_line_index + direction
@@ -1423,8 +1573,8 @@ class ListeningPlayer(tk.Tk):
             if self.is_looping_sentence:
                 # 更新当前句子索引
                 self.current_line_index = target_index
-                # 立即播放新的句子
-                self.play_current_sentence_with_speed()
+                # 异步播放新的句子
+                self.play_current_sentence_with_speed_async()
                 # 更新字幕显示
                 self.update_sentence_display()
             else:
@@ -1504,13 +1654,15 @@ class ListeningPlayer(tk.Tk):
                     # 检查是否播放结束，自动重播（使用更严格的判断）
                     if elapsed >= self.current_loop_duration - 0.05:  # 减少缓冲时间到0.05秒
                         # print("[DEBUG] 单句循环片段播放结束，自动重播")
-                        self.play_current_sentence_with_speed()
+                        if not self.is_processing_audio:  # 避免重复处理
+                            self.play_current_sentence_with_speed_async()
                         self._update_job = self.after(100, self.update_player_state)
                         return
                 # 如果没有循环播放时长信息，检查pygame播放状态
                 elif not pygame.mixer.music.get_busy():
                     # print("[DEBUG] pygame播放结束，重新播放当前句子")
-                    self.play_current_sentence_with_speed()
+                    if not self.is_processing_audio:  # 避免重复处理
+                        self.play_current_sentence_with_speed_async()
                     self._update_job = self.after(100, self.update_player_state)
                     return
                 # 更新字幕显示

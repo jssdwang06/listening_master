@@ -80,12 +80,17 @@ def check_license():
     except Exception:
         return False
 
+import datetime
+
 def save_license(key):
-    """保存有效的许可证密钥"""
+    """保存有效的许可证密钥和激活日期"""
     license_path = get_license_path()
+    date_path = os.path.join(os.path.dirname(license_path), 'activation_date.key')
     try:
         with open(license_path, 'w') as f:
             f.write(key)
+        with open(date_path, 'w') as f:
+            f.write(datetime.date.today().isoformat())
         return True
     except Exception as e:
         messagebox.showerror("保存失败", f"无法写入许可证文件: {e}")
