@@ -9,7 +9,7 @@ import subprocess
 # ！！！重要！！！
 # 这是你的私人密钥（盐），请务必修改成一个复杂且无人知晓的字符串。
 # 这个密钥绝对不能泄露，它被用于生成和验证注册码。
-SECRET_KEY = ""
+SECRET_KEY = "Ting_Li_Da_Shi_2025_07"
 LICENSE_FILE = "license.key"
 
 def get_resource_path(relative_path):

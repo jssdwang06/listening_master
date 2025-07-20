@@ -84,7 +84,6 @@ def show_ffmpeg_error_and_exit(error_message):
     root.destroy()
     sys.exit(1)
 
-
 class ListeningPlayer(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -99,9 +98,16 @@ class ListeningPlayer(tk.Tk):
         
         self.configure(bg='#fafafa')
         self._update_job = None
+        self._font_adjustment_job = None  # 字体调整任务ID
+        self._last_resize_time = 0  # 上次窗口大小变化时间
+        self._is_maximizing = False  # 标记是否正在最大化
+        self._last_font_update_time = 0  # 上次字体更新时间
+        self._font_update_cooldown = 0.2  # 字体更新冷却时间（200ms）
         
-        # 窗口大小变化监听
-        self.bind('<Configure>', self.on_window_resize)
+        # 窗口大小变化监听（优化版本）
+        self.bind('<Configure>', self.on_window_resize_optimized)
+        # 监听窗口状态变化（最大化/还原）
+        self.bind('<Map>', self.on_window_state_change_optimized)
         
         try:
             # 支持PyInstaller打包后的资源路径
@@ -124,17 +130,17 @@ class ListeningPlayer(tk.Tk):
 
         # Modern color scheme
         self.colors = {
-            # 'primary': '#1db954',
-            # 'primary_active': '#18a049',
+            'primary': '#1db954',
+            'primary_active': '#18a049',
             'danger': '#e22134',
             'text_primary': '#191414',
             'text_secondary': '#535353',
             'text_muted': '#b3b3b3',
-            'bg_primary': '#ffffff',
-            'bg_secondary': '#f0f0f0',
-            'bg_hover': '#e9e9e9',
-            'border': '#dcdcdc',
-            'bg': '#fafafa',
+            'bg_primary': '#f5f5f5',
+            'bg_secondary': '#eaeaea',
+            'bg_hover': '#e0e0e0',
+            'border': '#cccccc',
+            'bg': '#ececec',
         }
         
         # Configure ttk styles
@@ -162,6 +168,21 @@ class ListeningPlayer(tk.Tk):
         self.current_loop_start_time = 0.0  # 当前循环开始时间
         self.current_loop_end_time = 0.0  # 当前循环结束时间
         
+        # --- NEW: State for dictation mode ---
+        self.is_dictation_mode = False  # 听写模式标志
+        self.dictation_input = None  # 听写输入框
+        self.dictation_result_text = None  # 听写结果显示区域
+        self.dictation_stats_label = None  # 听写统计标签
+        self.dictation_sentence_playing = False  # 当前句子是否正在播放
+        self.dictation_current_sentence = 0  # 当前听写句子索引
+        self.dictation_results = []  # 听写结果记录
+        self.dictation_stats = {  # 听写统计
+            'total_chars': 0,
+            'correct_chars': 0,
+            'total_sentences': 0,
+            'correct_sentences': 0
+        }
+        
         # --- 异步处理相关 ---
         self.thread_pool = ThreadPoolExecutor(max_workers=2)  # 限制线程数量
         self.processing_queue = queue.Queue()  # 用于线程间通信
@@ -186,8 +207,8 @@ class ListeningPlayer(tk.Tk):
         self.create_views()
         self.show_initial_view()
         
-        # --- 初始化字体调整 ---
-        self.after(100, self.adjust_font_sizes)  # 延迟100ms调整字体，确保UI已完全加载
+        # --- 初始化字体调整（测试：优化版） ---
+        # self.after(500, self.adjust_font_sizes_once)  # 一次性字体调整
         
         # --- Main loop and closing protocol ---
         # self.update_player_state()
@@ -239,19 +260,93 @@ class ListeningPlayer(tk.Tk):
             'current_height': window_height
         }
     
-    def on_window_resize(self, event):
-        """窗口大小变化时的处理"""
+    def on_window_state_change_optimized(self, event):
+        """窗口状态变化处理（最大化/还原等）"""
+        if event.widget == self:
+            # 检测窗口是否处于最大化状态
+            current_state = self.state()
+            if current_state == 'zoomed':  # Windows下的最大化状态
+                self._is_maximizing = True
+                # 最大化时立即调整字体，但使用更长的防抖时间
+                if self._font_adjustment_job:
+                    self.after_cancel(self._font_adjustment_job)
+                self._font_adjustment_job = self.after(500, self.delayed_font_adjustment)
+            else:
+                self._is_maximizing = False
+    
+    def on_window_resize_optimized(self, event):
+        """优化的窗口大小变化处理 - 减少闪烁"""
+        # 只处理主窗口的resize事件
+        if event.widget == self:
+            # 检查是否为最大化操作（通常伴随大幅度尺寸变化）
+            new_width = event.width
+            new_height = event.height
+            
+            # 如果窗口尺寸变化过大，可能是最大化/还原操作，延迟处理
+            if hasattr(self, 'window_info'):
+                width_change = abs(new_width - self.window_info.get('current_width', new_width))
+                height_change = abs(new_height - self.window_info.get('current_height', new_height))
+                
+                # 如果变化幅度很大（可能是最大化），暂时不做任何处理
+                if width_change > 200 or height_change > 150:
+                    # 记录新尺寸但不立即处理
+                    self.window_info['current_width'] = new_width
+                    self.window_info['current_height'] = new_height
+                    return
+    
+    def on_window_resize_original(self, event):
+        """窗口大小变化时的处理（使用防抖机制）"""
         # 只处理主窗口的resize事件
         if event.widget == self:
             # 更新当前窗口大小信息
-            self.window_info['current_width'] = event.width
-            self.window_info['current_height'] = event.height
+            new_width = event.width
+            new_height = event.height
             
-            # 根据窗口大小调整字体大小
+            # 检查窗口大小是否真的改变了（避免微小变化触发）
+            width_changed = abs(new_width - self.window_info.get('current_width', 0)) > 15  # 提高阈值
+            height_changed = abs(new_height - self.window_info.get('current_height', 0)) > 15
+            
+            if width_changed or height_changed:
+                self.window_info['current_width'] = new_width
+                self.window_info['current_height'] = new_height
+                
+                # 记录当前时间
+                self._last_resize_time = time.time()
+                
+                # 取消之前的字体调整任务
+                if self._font_adjustment_job:
+                    self.after_cancel(self._font_adjustment_job)
+                
+                # 根据是否正在最大化调整延迟时间
+                delay = 600 if self._is_maximizing else 300  # 最大化时使用更长延迟
+                self._font_adjustment_job = self.after(delay, self.delayed_font_adjustment)
+    
+    def delayed_font_adjustment(self):
+        """延迟字体调整（防抖机制）"""
+        current_time = time.time()
+        
+        # 检查字体更新冷却时间
+        if current_time - self._last_font_update_time < self._font_update_cooldown:
+            # 在冷却期内，延迟执行
+            self._font_adjustment_job = self.after(100, self.delayed_font_adjustment)
+            return
+        
+        # 检查是否在调整期间内有新的窗口大小变化
+        wait_time = 0.4 if self._is_maximizing else 0.25  # 最大化时等待更长时间
+        if current_time - self._last_resize_time >= wait_time:
             self.adjust_font_sizes()
+            self._font_adjustment_job = None
+            self._last_font_update_time = current_time  # 记录字体更新时间
+            # 最大化完成后重置标志
+            if self._is_maximizing:
+                self.after(100, lambda: setattr(self, '_is_maximizing', False))
+        else:
+            # 如果还有新的变化，继续延迟
+            delay = 100 if self._is_maximizing else 50
+            self._font_adjustment_job = self.after(delay, self.delayed_font_adjustment)
     
     def adjust_font_sizes(self):
-        """根据窗口大小调整字体大小"""
+        """根据窗口大小调整字体大小（优化版本 - 减少闪烁）"""
         try:
             current_width = self.window_info['current_width']
             current_height = self.window_info['current_height']
@@ -269,17 +364,43 @@ class ListeningPlayer(tk.Tk):
             # 根据缩放比例调整字体大小
             base_font_size = 20
             scaled_font_size = int(base_font_size * scale_ratio)
-            
-            # 更新当前行字幕的字体大小
-            if hasattr(self, 'current_line_text'):
-                self.current_line_text.config(font=("Segoe UI", scaled_font_size))
-            
-            # 更新上一行和下一行字幕的字体大小
             secondary_font_size = int(12 * scale_ratio)
-            if hasattr(self, 'prev_line_text'):
-                self.prev_line_text.config(font=("Segoe UI", secondary_font_size))
-            if hasattr(self, 'next_line_text'):
-                self.next_line_text.config(font=("Segoe UI", secondary_font_size))
+            
+            # 检查是否需要更新字体大小（避免不必要的更新）
+            need_update = False
+            
+            # 检查当前行字幕字体
+            if hasattr(self, 'current_line_text'):
+                current_font = self.current_line_text.cget('font')
+                if isinstance(current_font, tuple) and len(current_font) >= 2:
+                    if abs(current_font[1] - scaled_font_size) > 1:  # 只有差异大于1才更新
+                        need_update = True
+                else:
+                    need_update = True
+            
+            if need_update or not hasattr(self, '_last_font_size'):
+                # 批量更新字体，减少重绘次数
+                self.update_idletasks()  # 确保之前的更新完成
+                
+                # 临时禁用字幕文本的自动换行，减少闪烁
+                widgets_to_update = []
+                if hasattr(self, 'current_line_text'):
+                    widgets_to_update.append((self.current_line_text, scaled_font_size))
+                if hasattr(self, 'prev_line_text'):
+                    widgets_to_update.append((self.prev_line_text, secondary_font_size))
+                if hasattr(self, 'next_line_text'):
+                    widgets_to_update.append((self.next_line_text, secondary_font_size))
+                
+                # 批量更新字体，在同一个update_idletasks周期内完成
+                for widget, font_size in widgets_to_update:
+                    widget.config(font=("Segoe UI", font_size))
+                
+                # 统一刷新所有文本控件
+                for widget, _ in widgets_to_update:
+                    widget.update_idletasks()
+                
+                # 记录最后的字体大小，用于下次比较
+                self._last_font_size = scaled_font_size
             
             # 更新标题字体大小
             title_font_size = int(22 * scale_ratio)
@@ -521,21 +642,34 @@ class ListeningPlayer(tk.Tk):
                     f.write("- 右箭头：下一句\n")
                     f.write("- 上箭头：显示字幕\n")
                     f.write("- 下箭头：隐藏字幕\n")
-                    f.write("- x：开启/关闭单句循环\n\n")
+                    f.write("- x：开启/关闭单句循环\n")
+                    f.write("注意：在听写模式下，快捷键会被自动禁用以免干扰输入\n\n")
                     f.write("=== 倍速播放功能 ===\n")
                     f.write("1. 点击'🔁 单句循环'按钮启用单句循环模式\n")
                     f.write("2. 启用单句循环后，倍速选择框会自动激活\n")
                     f.write("3. 可选择的播放速度：0.5x、0.75x、1.0x、1.25x、1.5x、2.0x\n")
                     f.write("4. 倍速功能仅在单句循环模式下有效\n")
                     f.write("5. 切换倍速时，当前句子会立即以新速度重播\n")
-                    f.write("6. 单句循环模式下支持切换上一句和下一句\n\n")    
+                    f.write("6. 单句循环模式下支持切换上一句和下一句\n\n")
+                    f.write("=== 听写练习模式（v3新增） ===\n")
+                    f.write("1. 加载音频和字幕文件后，点击'✏️ 听写模式'按钮\n")
+                    f.write("2. 点击'🔊 播放句子'听取当前句子\n")
+                    f.write("3. 在输入框中输入您听到的内容\n")
+                    f.write("4. 点击'✔️ 提交答案'或按Enter键提交\n")
+                    f.write("5. 查看对比结果和准确率统计\n")
+                    f.write("6. 点击'➡️ 下一句'继续练习\n")
+                    f.write("7. 可随时点击'🔙 返回播放'切换回普通模式\n")
+                    f.write("高亮显示：绿色=正确，红色=错误，橙色=缺失，紫色=多余\n")
+                    f.write("准确率计算：实时显示字符和句子准确率\n\n")    
                     f.write("=== 使用技巧 ===\n")
                     f.write("• 初学者建议使用0.5x-0.75x慢速练习\n")
                     f.write("• 熟练后可使用1.25x-1.5x提高练习效率\n")
                     f.write("• 挑战自己时可使用2.0x高速播放\n")
-                    f.write("• 单句循环配合倍速功能，可针对难点句子反复练习\n\n")
+                    f.write("• 单句循环配合倍速功能，可针对难点句子反复练习\n")
+                    f.write("• 听写模式适合深入练习，能有效提高听力理解能力\n\n")
                     f.write("=== 注意事项 ===\n")
                     f.write("• 倍速处理可能需要一定时间，请耐心等待\n")
+                    f.write("• 听写模式下所有快捷键被禁用，以避免干扰输入\n")
                     f.write("• 如遇到问题，请重新启动程序\n")
                 
         except Exception as e:
@@ -552,6 +686,10 @@ class ListeningPlayer(tk.Tk):
         
     def global_space_handler(self, event):
         """全局空格键处理器"""
+        # 在听写模式下，空格键不执行播放/暂停功能
+        if self.is_dictation_mode:
+            return "break"
+            
         if self.is_loaded:
             self.toggle_play_pause()
         else:
@@ -560,30 +698,50 @@ class ListeningPlayer(tk.Tk):
         
     def global_left_handler(self, event):
         """全局左箭头处理器"""
+        # 在听写模式下，左箭头键不执行跳转功能
+        if self.is_dictation_mode:
+            return "break"
+            
         if self.is_loaded:
             self.jump_to_sentence(-1)
         return "break"
         
     def global_right_handler(self, event):
         """全局右箭头处理器"""
+        # 在听写模式下，右箭头键不执行跳转功能
+        if self.is_dictation_mode:
+            return "break"
+            
         if self.is_loaded:
             self.jump_to_sentence(1)
         return "break"
         
     def global_up_handler(self, event):
         """全局上箭头处理器"""
+        # 在听写模式下，上箭头键不执行显示字幕功能
+        if self.is_dictation_mode:
+            return "break"
+            
         if self.is_loaded:
             self.show_subtitles()
         return "break"
         
     def global_down_handler(self, event):
         """全局下箭头处理器"""
+        # 在听写模式下，下箭头键不执行隐藏字幕功能
+        if self.is_dictation_mode:
+            return "break"
+            
         if self.is_loaded:
             self.hide_subtitles()
         return "break"
         
     def global_x_handler(self, event):
         """全局x键处理器"""
+        # 在听写模式下，x键不执行单句循环功能
+        if self.is_dictation_mode:
+            return "break"
+            
         if self.is_loaded:
             self.toggle_sentence_loop()
         return "break"
@@ -771,9 +929,17 @@ class ListeningPlayer(tk.Tk):
 
         self.toggle_subtitles_btn = ttk.Button(buttons_container, text="💬 隐藏字幕", command=self.toggle_subtitles, style="Control.TButton")
         self.toggle_subtitles_btn.pack(side=tk.LEFT, padx=(0, 2))
+        
+        # --- 新增：听写模式按钮 ---
+        self.dictation_mode_btn = ttk.Button(buttons_container, text="✏️ 听写模式", command=self.toggle_dictation_mode, style="Control.TButton")
+        self.dictation_mode_btn.pack(side=tk.LEFT, padx=(0, 2))
 
         btn_home = ttk.Button(buttons_container, text="🏠 返回主页", command=self.back_to_home, style="Control.TButton")
         btn_home.pack(side=tk.LEFT) # 最后一个按钮右侧不需要间距
+        
+        # --- 创建听写练习界面 ---
+        self.dictation_frame = ttk.Frame(self)
+        self.create_dictation_view()
 
     def on_speed_change(self, event=None):
         speed_str = self.speed_var.get().replace("x", "")
@@ -1163,6 +1329,10 @@ class ListeningPlayer(tk.Tk):
         self.speed_combobox.configure(state="disabled") # 重置倍速选择
         self.loop_play_start_time = None # 清理手动计时
         
+        # 隐藏听写界面如果在听写模式
+        if self.is_dictation_mode:
+            self.hide_dictation_view()
+        
         self.show_initial_view()
         self.play_pause_btn.config(text="▶ 播放")
         self.progress_bar.set(0)
@@ -1399,7 +1569,7 @@ class ListeningPlayer(tk.Tk):
                 
                 time_in_seconds = srt_time_to_seconds(start_time_str)
                 self.lyrics.append((time_in_seconds, text))
-
+        
         except Exception as e:
             print(f"使用正则表达式解析SRT失败: {e}，尝试备用方法。")
             try:
@@ -1565,6 +1735,551 @@ class ListeningPlayer(tk.Tk):
         # 确保焦点回到主窗口
         self.focus_set()
     
+    def toggle_dictation_mode(self):
+        """切换到听写练习界面"""
+        # 检查是否已经加载音频
+        if not self.is_loaded:
+            messagebox.showinfo("提示", "请先加载音频文件再使用听写功能。", parent=self)
+            return
+        
+        # 切换到听写界面
+        self.show_dictation_view()
+    
+    def create_dictation_view(self):
+        """创建听写练习界面"""
+        # 主容器
+        main_container = ttk.Frame(self.dictation_frame)
+        main_container.pack(expand=True, fill=tk.BOTH, padx=40, pady=40)
+        
+        # 标题区域
+        title_frame = ttk.Frame(main_container)
+        title_frame.pack(fill=tk.X, pady=(0, 30))
+        
+        title_label = ttk.Label(title_frame, text="听写练习", 
+                               font=("Segoe UI", 28, "bold"), 
+                               foreground=self.colors['text_primary'])
+        title_label.pack()
+        
+        # 进度显示
+        self.dictation_progress_label = ttk.Label(title_frame, text="准备开始", 
+                                                 font=("Segoe UI", 14),
+                                                 foreground=self.colors['text_secondary'])
+        self.dictation_progress_label.pack(pady=(5, 0))
+        
+        # 内容区域
+        content_frame = ttk.Frame(main_container)
+        content_frame.pack(expand=True, fill=tk.BOTH, pady=(0, 20))
+        
+        # 当前句子显示区域（居中）
+        sentence_frame = ttk.Frame(content_frame)
+        sentence_frame.pack(expand=True, fill=tk.BOTH)
+        
+        self.dictation_sentence_label = ttk.Label(sentence_frame, text="点击'播放句子'开始听写练习", 
+                                                 font=("Segoe UI", 16, "bold"),
+                                                 foreground=self.colors['text_primary'],
+                                                 justify=tk.CENTER,
+                                                 wraplength=800)
+        self.dictation_sentence_label.pack(expand=True, pady=(50, 30))
+        
+        # 输入区域
+        input_container = ttk.Frame(content_frame)
+        input_container.pack(fill=tk.X, pady=(0, 20))
+        
+        ttk.Label(input_container, text="请输入您听到的内容：", 
+                 font=("Segoe UI", 14)).pack(anchor=tk.W, pady=(0, 10))
+        
+        self.dictation_input = tk.Text(input_container, height=4, 
+                                      font=("Segoe UI", 13),
+                                      wrap=tk.WORD,
+                                      bg=self.colors['bg_primary'],
+                                      fg=self.colors['text_primary'],
+                                      relief=tk.SOLID, 
+                                      borderwidth=1,
+                                      highlightthickness=2,
+                                      highlightcolor='#4285f4',
+                                      insertbackground=self.colors['text_primary'])
+        self.dictation_input.pack(fill=tk.X, pady=(0, 20))
+        
+        # Bind Enter key to submit answer
+        self.dictation_input.bind('<Return>', self.submit_dictation_on_enter_main)
+        
+        # 结果显示区域
+        result_container = ttk.Frame(content_frame)
+        result_container.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(result_container, text="对比结果：", 
+                 font=("Segoe UI", 14, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        self.dictation_result_text = tk.Text(result_container, height=6, 
+                                           font=("Segoe UI", 12),
+                                           wrap=tk.WORD, state=tk.DISABLED,
+                                           bg=self.colors['bg_secondary'],
+                                           fg=self.colors['text_primary'],
+                                           relief=tk.SOLID,
+                                           borderwidth=1)
+        self.dictation_result_text.pack(fill=tk.BOTH, expand=True)
+        
+        # 配置文本标签样式
+        self.dictation_result_text.tag_configure("correct", foreground="#2d7d32", background="#e8f5e8")
+        self.dictation_result_text.tag_configure("incorrect", foreground="#d32f2f", background="#ffebee")
+        self.dictation_result_text.tag_configure("missing", foreground="#f57c00", background="#fff3e0")
+        self.dictation_result_text.tag_configure("extra", foreground="#7b1fa2", background="#f3e5f5")
+        self.dictation_result_text.tag_configure("user_answer", foreground="#1976d2", font=("Segoe UI", 12, "bold"))
+        self.dictation_result_text.tag_configure("header", foreground="#424242", font=("Segoe UI", 13, "bold"))
+        
+        # 统计信息
+        self.dictation_stats_label = ttk.Label(main_container, text="准备开始听写练习", 
+                                             font=("Segoe UI", 12),
+                                             foreground=self.colors['text_secondary'])
+        self.dictation_stats_label.pack(pady=(10, 0))
+        
+        # 底部控制按钮
+        control_frame = ttk.Frame(self.dictation_frame)
+        control_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 20), padx=40)
+        
+        buttons_container = ttk.Frame(control_frame)
+        buttons_container.pack(anchor="center")
+        
+        self.dictation_play_btn = ttk.Button(buttons_container, text="🔊 播放句子", 
+                                            command=self.play_dictation_sentence,
+                                            style="Control.TButton",
+                                            width=12)
+        self.dictation_play_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.dictation_submit_btn = ttk.Button(buttons_container, text="✔️ 提交答案", 
+                                              command=self.submit_dictation_answer,
+                                              style="Control.TButton",
+                                              width=12)
+        self.dictation_submit_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.dictation_next_btn = ttk.Button(buttons_container, text="➡️ 下一句", 
+                                            command=self.next_dictation_sentence,
+                                            style="Control.TButton",
+                                            width=10,
+                                            state=tk.DISABLED)
+        self.dictation_next_btn.pack(side=tk.LEFT, padx=(0, 20))
+        
+        self.dictation_reset_btn = ttk.Button(buttons_container, text="🔄 重置练习", 
+                                             command=self.reset_dictation,
+                                             style="Control.TButton",
+                                             width=12)
+        self.dictation_reset_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        dictation_back_btn = ttk.Button(buttons_container, text="🔙 返回播放", 
+                                       command=self.back_to_player_from_dictation,
+                                       style="Control.TButton",
+                                       width=12)
+        dictation_back_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        dictation_home_btn = ttk.Button(buttons_container, text="🏠 返回主页", 
+                                       command=self.back_to_home,
+                                       style="Control.TButton",
+                                       width=12)
+        dictation_home_btn.pack(side=tk.LEFT)
+    
+    def show_dictation_view(self):
+        """显示听写练习界面"""
+        # 暂停播放
+        if not self.is_paused:
+            self.toggle_play_pause()
+        
+        # 隐藏播放界面
+        self.player_frame.pack_forget()
+        
+        # 显示听写界面
+        self.dictation_frame.pack(expand=True, fill=tk.BOTH)
+        
+        # 初始化听写状态
+        self.is_dictation_mode = True
+        self.dictation_current_sentence = 0
+        self.dictation_results = []
+        self.dictation_stats = {
+            'total_chars': 0,
+            'correct_chars': 0,
+            'total_sentences': 0,
+            'correct_sentences': 0
+        }
+        
+        # 更新界面显示
+        self.update_dictation_display()
+        
+        # 聚焦到输入框
+        self.dictation_input.focus_set()
+    
+    def hide_dictation_view(self):
+        """隐藏听写练习界面"""
+        self.dictation_frame.pack_forget()
+        self.is_dictation_mode = False
+    
+    def back_to_player_from_dictation(self):
+        """从听写界面返回到播放界面"""
+        # 隐藏听写界面
+        self.hide_dictation_view()
+        
+        # 显示播放界面
+        self.show_player_view()
+    
+    def create_dictation_ui(self):
+        """创建听写界面"""
+        if hasattr(self, 'dictation_created'):
+            return  # 如果已经创建，直接返回
+        
+        # 创建听写界面容器
+        self.dictation_frame = ttk.Frame(self.player_frame)
+        self.dictation_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=40, pady=(10, 0))
+        
+        # 听写标题
+        title_label = ttk.Label(self.dictation_frame, text="听写练习", 
+                               font=("Segoe UI", 14, "bold"), 
+                               foreground=self.colors['text_primary'])
+        title_label.pack(pady=(10, 5))
+        
+        # 听写输入区域
+        input_frame = ttk.Frame(self.dictation_frame)
+        input_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(input_frame, text="请输入您听到的内容：", 
+                 font=("Segoe UI", 11)).pack(anchor=tk.W)
+        
+        self.dictation_input = tk.Text(input_frame, height=3, 
+                                      font=("Segoe UI", 11),
+                                      wrap=tk.WORD,
+                                      bg=self.colors['bg_primary'],
+                                      fg=self.colors['text_primary'],
+                                      relief=tk.FLAT, 
+                                      borderwidth=1,
+                                      highlightthickness=1,
+                                      highlightcolor=self.colors['border'])
+        self.dictation_input.pack(fill=tk.X, pady=5)
+        self.dictation_input.bind('<Return>', self.submit_dictation_on_enter_input)
+        self.dictation_input.configure(highlightthickness=1, highlightcolor='#4285f4')
+        
+        # 听写控制按钮
+        control_frame = ttk.Frame(self.dictation_frame)
+        control_frame.pack(fill=tk.X, pady=5)
+        
+        self.dictation_play_btn = ttk.Button(control_frame, text="🔊 播放句子", 
+                                            command=self.play_dictation_sentence,
+                                            style="Control.TButton")
+        self.dictation_play_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.dictation_submit_btn = ttk.Button(control_frame, text="✔️ 提交答案", 
+                                              command=self.submit_dictation_answer,
+                                              style="Control.TButton")
+        self.dictation_submit_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.dictation_next_btn = ttk.Button(control_frame, text="➡️ 下一句", 
+                                            command=self.next_dictation_sentence,
+                                            style="Control.TButton", 
+                                            state=tk.DISABLED)
+        self.dictation_next_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.dictation_reset_btn = ttk.Button(control_frame, text="🔄 重置练习", 
+                                             command=self.reset_dictation,
+                                             style="Control.TButton")
+        self.dictation_reset_btn.pack(side=tk.RIGHT)
+        
+        # 结果显示区域
+        result_frame = ttk.Frame(self.dictation_frame)
+        result_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        ttk.Label(result_frame, text="对比结果：", 
+                 font=("Segoe UI", 11, "bold")).pack(anchor=tk.W)
+        
+        # 创建文本框显示对比结果
+        self.dictation_result_text = tk.Text(result_frame, height=4, 
+                                           font=("Segoe UI", 10),
+                                           wrap=tk.WORD, state=tk.DISABLED,
+                                           bg=self.colors['bg_secondary'],
+                                           fg=self.colors['text_primary'],
+                                           relief=tk.FLAT)
+        self.dictation_result_text.pack(fill=tk.X, pady=5)
+        
+        # 配置文本标签样式
+        self.dictation_result_text.tag_configure("correct", foreground="#2d7d32", background="#e8f5e8")
+        self.dictation_result_text.tag_configure("incorrect", foreground="#d32f2f", background="#ffebee")
+        self.dictation_result_text.tag_configure("missing", foreground="#f57c00", background="#fff3e0")
+        self.dictation_result_text.tag_configure("extra", foreground="#7b1fa2", background="#f3e5f5")
+        
+        # 统计信息
+        self.dictation_stats_label = ttk.Label(self.dictation_frame, text="准备开始听写练习", 
+                                             font=("Segoe UI", 10),
+                                             foreground=self.colors['text_secondary'])
+        self.dictation_stats_label.pack(pady=(5, 10))
+    
+    def open_dictation_window(self):
+        """打开独立的听写练习窗口"""
+        # 创建听写窗口
+        self.dictation_window = DictationWindow(self)
+        
+        # 设置窗口关闭事件
+        self.create_dictation_ui()
+    
+    def play_dictation_sentence(self):
+        """播放当前听写句子"""
+        if not self.lyrics or self.dictation_current_sentence >= len(self.lyrics):
+            return
+        
+        # 获取当前句子的时间
+        start_time = self.lyrics[self.dictation_current_sentence][0]
+        
+        # 使用与播放界面相同的跳转逻辑
+        self.progress_bar.set(start_time)
+        self.perform_seek(None)  # 使用相同的seek逻辑
+        
+        # 如果音频处于暂停状态，开始播放
+        if self.is_paused:
+            pygame.mixer.music.play(start=start_time)
+            self.is_paused = False
+        
+        # 标记句子正在播放
+        self.dictation_sentence_playing = True
+        self.dictation_play_btn.config(text="🔊 播放中...", state=tk.DISABLED)
+        
+        # 计算句子播放时长，自动暂停
+        if self.dictation_current_sentence < len(self.lyrics) - 1:
+            end_time = self.lyrics[self.dictation_current_sentence + 1][0]
+        else:
+            end_time = self.current_audio_total_length
+        
+        duration = end_time - start_time
+        # 延迟暂停播放
+        self.after(int(duration * 1000 + 500), self.pause_dictation_playback)
+    
+    def pause_dictation_playback(self):
+        """听写句子播放完成后自动暂停"""
+        pygame.mixer.music.pause()
+        self.is_paused = True
+        self.dictation_sentence_playing = False
+        self.dictation_play_btn.config(text="🔊 播放句子", state=tk.NORMAL)
+    
+    def submit_dictation_answer(self):
+        """提交听写答案并显示对比结果"""
+        if not self.dictation_input:
+            return
+        
+        # 获取用户输入
+        user_input = self.dictation_input.get("1.0", tk.END).strip()
+        if not user_input:
+            messagebox.showinfo("提示", "请先输入您听到的内容。", parent=self)
+            return
+        
+        # 获取正确答案
+        if self.dictation_current_sentence >= len(self.lyrics):
+            return
+        
+        correct_text = self.lyrics[self.dictation_current_sentence][1]
+        
+        # 比较文本并显示结果（不区分大小写）
+        self.compare_and_display_result(user_input, correct_text)
+        
+        # 启用下一句按钮
+        self.dictation_next_btn.config(state=tk.NORMAL)
+        
+        # 更新统计
+        self.update_dictation_stats(user_input, correct_text)
+    
+    def submit_dictation_on_enter_input(self, event=None):
+        self.submit_dictation_answer()
+        return "break"
+    
+    def submit_dictation_on_enter_main(self, event=None):
+        self.submit_dictation_answer()
+        return "break"
+
+    def compare_and_display_result(self, user_input, correct_text):
+        """比较用户输入和正确答案，显示差异（不区分大小写）"""
+        import difflib
+        
+        # 转换为小写进行比较
+        user_lower = user_input.lower()
+        correct_lower = correct_text.lower()
+        
+        # 清空结果显示区域
+        self.dictation_result_text.config(state=tk.NORMAL)
+        self.dictation_result_text.delete("1.0", tk.END)
+        
+        # 添加标题
+        self.dictation_result_text.insert(tk.END, "正确答案：\n", "correct")
+        self.dictation_result_text.insert(tk.END, correct_text + "\n\n", "correct")
+        
+        self.dictation_result_text.insert(tk.END, "您的答案：\n", "user_answer")
+        self.dictation_result_text.insert(tk.END, user_input + "\n\n", "user_answer")
+        
+        # 使用difflib进行字符级别的比较
+        self.dictation_result_text.insert(tk.END, "详细对比：\n", "header")
+        
+        # 简单的字符匹配对比
+        correct_chars = list(correct_text)
+        user_chars = list(user_input)
+        
+        # 使用difflib的SequenceMatcher（基于小写版本）
+        matcher = difflib.SequenceMatcher(None, user_lower, correct_lower)
+        
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                # 正确的字符
+                text = ''.join(correct_chars[j1:j2])  # 使用用户输入的字符保持原始大小写
+                self.dictation_result_text.insert(tk.END, text, "correct")
+            elif tag == 'replace':
+                # 替换（错误）- 显示用户错误的部分为红色
+                user_part = ''.join(user_chars[j1:j2])
+                self.dictation_result_text.insert(tk.END, user_part, "incorrect")
+            elif tag == 'delete':
+                # 缺失的字符 - 显示正确答案中缺失的部分
+                missing_text = ''.join(correct_chars[i1:i2])
+                self.dictation_result_text.insert(tk.END, missing_text, "missing")
+            elif tag == 'insert':
+                # 多余的字符 - 显示用户多输入的部分为红色
+                extra_text = ''.join(user_chars[j1:j2])
+                self.dictation_result_text.insert(tk.END, extra_text, "incorrect")
+        
+        self.dictation_result_text.config(state=tk.DISABLED)
+    
+    def update_dictation_stats(self, user_input, correct_text):
+        """更新听写统计信息"""
+        # 计算字符准确率
+        import difflib
+        
+        matcher = difflib.SequenceMatcher(None, correct_text, user_input)
+        similarity = matcher.ratio()
+        
+        # 更新统计数据
+        self.dictation_stats['total_sentences'] += 1
+        self.dictation_stats['total_chars'] += len(correct_text)
+        
+        # 简单的准确率计算
+        correct_chars = int(len(correct_text) * similarity)
+        self.dictation_stats['correct_chars'] += correct_chars
+        
+        # 如果相似度超过80%，认为句子正确
+        if similarity > 0.8:
+            self.dictation_stats['correct_sentences'] += 1
+        
+        # 记录结果
+        self.dictation_results.append({
+            'sentence_index': self.dictation_current_sentence,
+            'correct_text': correct_text,
+            'user_input': user_input,
+            'similarity': similarity
+        })
+        
+        # 更新显示
+        self.update_dictation_display()
+    
+    def next_dictation_sentence(self):
+        """切换到下一句听写"""
+        # 清空输入框
+        if self.dictation_input:
+            self.dictation_input.delete("1.0", tk.END)
+        
+        # 移动到下一句
+        self.dictation_current_sentence += 1
+        
+        # 禁用下一句按钮直到下次提交
+        self.dictation_next_btn.config(state=tk.DISABLED)
+        
+        # 更新显示
+        self.update_dictation_display()
+        
+        # 清空结果显示
+        if self.dictation_result_text:
+            self.dictation_result_text.config(state=tk.NORMAL)
+            self.dictation_result_text.delete("1.0", tk.END)
+            self.dictation_result_text.insert(tk.END, "请先播放句子，然后输入您听到的内容。")
+            self.dictation_result_text.config(state=tk.DISABLED)
+        
+        # 聚焦到输入框
+        if self.dictation_input:
+            self.dictation_input.focus_set()
+    
+    def reset_dictation(self):
+        """重置听写练习"""
+        if not messagebox.askyesno("确认重置", "确定要重置听写练习吗？这将清空所有进度。", parent=self):
+            return
+        
+        # 重置所有状态
+        self.dictation_current_sentence = 0
+        self.dictation_results = []
+        self.dictation_stats = {
+            'total_chars': 0,
+            'correct_chars': 0,
+            'total_sentences': 0,
+            'correct_sentences': 0
+        }
+        
+        # 清空界面
+        if self.dictation_input:
+            self.dictation_input.delete("1.0", tk.END)
+        
+        if self.dictation_result_text:
+            self.dictation_result_text.config(state=tk.NORMAL)
+            self.dictation_result_text.delete("1.0", tk.END)
+            self.dictation_result_text.insert(tk.END, "请先播放句子，然后输入您听到的内容。")
+            self.dictation_result_text.config(state=tk.DISABLED)
+        
+        # 重置按钮状态
+        self.dictation_next_btn.config(state=tk.DISABLED)
+        
+        # 更新显示
+        self.update_dictation_display()
+    
+    def update_dictation_display(self):
+        """更新听写界面显示"""
+        if not self.dictation_stats_label:
+            return
+        
+        # 检查是否完成所有句子
+        if self.dictation_current_sentence >= len(self.lyrics):
+            # 计算最终统计
+            if self.dictation_stats['total_chars'] > 0:
+                char_accuracy = (self.dictation_stats['correct_chars'] / self.dictation_stats['total_chars']) * 100
+            else:
+                char_accuracy = 0
+            
+            if self.dictation_stats['total_sentences'] > 0:
+                sentence_accuracy = (self.dictation_stats['correct_sentences'] / self.dictation_stats['total_sentences']) * 100
+            else:
+                sentence_accuracy = 0
+            
+            stats_text = f"✅ 听写完成！字符准确率：{char_accuracy:.1f}%，句子准确率：{sentence_accuracy:.1f}%"
+            
+            # 禁用相关按钮
+            if hasattr(self, 'dictation_play_btn'):
+                self.dictation_play_btn.config(state=tk.DISABLED)
+            if hasattr(self, 'dictation_submit_btn'):
+                self.dictation_submit_btn.config(state=tk.DISABLED)
+            if hasattr(self, 'dictation_next_btn'):
+                self.dictation_next_btn.config(state=tk.DISABLED)
+        else:
+            # 显示当前进度
+            current_progress = self.dictation_current_sentence + 1
+            total_sentences = len(self.lyrics)
+            
+            if self.dictation_stats['total_sentences'] > 0:
+                char_accuracy = (self.dictation_stats['correct_chars'] / self.dictation_stats['total_chars']) * 100
+                sentence_accuracy = (self.dictation_stats['correct_sentences'] / self.dictation_stats['total_sentences']) * 100
+                stats_text = (f"进度：{current_progress}/{total_sentences} | "
+                           f"字符准确率：{char_accuracy:.1f}% | "
+                           f"句子准确率：{sentence_accuracy:.1f}%")
+            else:
+                stats_text = f"进度：{current_progress}/{total_sentences} | 准备开始第 {current_progress} 句"
+            
+            # 确保按钮可用
+            if hasattr(self, 'dictation_play_btn'):
+                self.dictation_play_btn.config(state=tk.NORMAL)
+            if hasattr(self, 'dictation_submit_btn'):
+                self.dictation_submit_btn.config(state=tk.NORMAL)
+        
+        self.dictation_stats_label.config(text=stats_text)
+
+    def show_history_context_menu(self, event):
+        item_id = self.history_tree.identify_row(event.y)
+        if item_id:
+            if item_id not in self.history_tree.selection():
+                self.history_tree.selection_set(item_id)
+            self.history_context_menu.post(event.x_root, event.y_root)
+            
     def jump_to_sentence(self, direction):
         if not self.lyrics: return
         target_index = self.current_line_index + direction
@@ -1608,24 +2323,53 @@ class ListeningPlayer(tk.Tk):
             current_text = self.lyrics[self.current_line_index][1] if self.current_line_index != -1 else ""
             next_text = self.lyrics[self.current_line_index + 1][1] if self.current_line_index < len(self.lyrics) - 1 else ""
             
-            self.prev_line_text.config(state=tk.NORMAL)
-            self.prev_line_text.delete('1.0', tk.END)
-            self.current_line_text.config(state=tk.NORMAL)
-            self.current_line_text.delete('1.0', tk.END)
-            self.next_line_text.config(state=tk.NORMAL)
-            self.next_line_text.delete('1.0', tk.END)
-            
-            self.prev_line_text.insert(tk.END, prev_text)
-            self.prev_line_text.tag_add("centered", "1.0", tk.END)
-            self.prev_line_text.config(state=tk.DISABLED)
+            # 防闪烁优化：检查内容是否真的需要更新
+            try:
+                current_prev = self.prev_line_text.get('1.0', 'end-1c')
+                current_main = self.current_line_text.get('1.0', 'end-1c')
+                current_next = self.next_line_text.get('1.0', 'end-1c')
+                
+                # 只更新内容真正改变的文本框
+                if current_prev != prev_text:
+                    self.prev_line_text.config(state=tk.NORMAL)
+                    self.prev_line_text.delete('1.0', tk.END)
+                    self.prev_line_text.insert(tk.END, prev_text)
+                    self.prev_line_text.tag_add("centered", "1.0", tk.END)
+                    self.prev_line_text.config(state=tk.DISABLED)
+                
+                if current_main != current_text:
+                    self.current_line_text.config(state=tk.NORMAL)
+                    self.current_line_text.delete('1.0', tk.END)
+                    self.current_line_text.insert(tk.END, current_text)
+                    self.current_line_text.tag_add("justified", "1.0", tk.END)
+                    self.current_line_text.config(state=tk.DISABLED)
+                
+                if current_next != next_text:
+                    self.next_line_text.config(state=tk.NORMAL)
+                    self.next_line_text.delete('1.0', tk.END)
+                    self.next_line_text.insert(tk.END, next_text)
+                    self.next_line_text.tag_add("centered", "1.0", tk.END)
+                    self.next_line_text.config(state=tk.DISABLED)
+                    
+            except tk.TclError:
+                # 如果获取文本失败，则进行完整更新
+                self.prev_line_text.config(state=tk.NORMAL)
+                self.prev_line_text.delete('1.0', tk.END)
+                self.prev_line_text.insert(tk.END, prev_text)
+                self.prev_line_text.tag_add("centered", "1.0", tk.END)
+                self.prev_line_text.config(state=tk.DISABLED)
 
-            self.current_line_text.insert(tk.END, current_text)
-            self.current_line_text.tag_add("justified", "1.0", tk.END)
-            self.current_line_text.config(state=tk.DISABLED)
+                self.current_line_text.config(state=tk.NORMAL)
+                self.current_line_text.delete('1.0', tk.END)
+                self.current_line_text.insert(tk.END, current_text)
+                self.current_line_text.tag_add("justified", "1.0", tk.END)
+                self.current_line_text.config(state=tk.DISABLED)
 
-            self.next_line_text.insert(tk.END, next_text)
-            self.next_line_text.tag_add("centered", "1.0", tk.END)
-            self.next_line_text.config(state=tk.DISABLED)
+                self.next_line_text.config(state=tk.NORMAL)
+                self.next_line_text.delete('1.0', tk.END)
+                self.next_line_text.insert(tk.END, next_text)
+                self.next_line_text.tag_add("centered", "1.0", tk.END)
+                self.next_line_text.config(state=tk.DISABLED)
             
     # --- MODIFIED: The core logic update function ---
     def update_player_state(self, force_update=False):
