@@ -5,6 +5,7 @@ import hashlib
 import tkinter as tk
 from tkinter import messagebox, Toplevel, Entry, Label, Button, Frame
 import subprocess
+import sqlite3
 
 # ！！！重要！！！
 # 这是你的私人密钥（盐），请务必修改成一个复杂且无人知晓的字符串。
@@ -64,36 +65,116 @@ def verify_key(user_key):
     expected_key = generate_key(local_machine_id)
     return user_key.strip() == expected_key
 
-def check_license():
-    """检查是否存在有效的许可证文件"""
-    license_path = get_license_path()
-    if not os.path.exists(license_path):
-        return False
+def get_db_path():
+    """获取数据库文件路径"""
+    if hasattr(sys, '_MEIPASS'):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, 'listening_history.db')
+
+def create_activation_table():
+    """创建激活信息表"""
     try:
-        with open(license_path, 'r') as f:
-            stored_key = f.read().strip()
-        if verify_key(stored_key):
-            return True
-        else:
-            os.remove(license_path)
+        db_path = get_db_path()
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS activation_info (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                activation_key TEXT NOT NULL,
+                activation_date TEXT NOT NULL,
+                machine_id TEXT NOT NULL,
+                created_time TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+def check_license():
+    """检查是否存在有效的激活信息"""
+    try:
+        db_path = get_db_path()
+        if not os.path.exists(db_path):
             return False
+            
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # 确保激活信息表存在
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS activation_info (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                activation_key TEXT NOT NULL,
+                activation_date TEXT NOT NULL,
+                machine_id TEXT NOT NULL,
+                created_time TEXT NOT NULL
+            )
+        """)
+        
+        # 查询激活信息
+        cursor.execute("SELECT activation_key FROM activation_info ORDER BY created_time DESC LIMIT 1")
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            stored_key = result[0]
+            if verify_key(stored_key):
+                return True
+            else:
+                # 如果密钥无效，删除激活记录
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM activation_info")
+                conn.commit()
+                conn.close()
+                return False
+        return False
     except Exception:
         return False
 
 import datetime
 
 def save_license(key):
-    """保存有效的许可证密钥和激活日期"""
-    license_path = get_license_path()
-    date_path = os.path.join(os.path.dirname(license_path), 'activation_date.key')
+    """保存有效的许可证密钥和激活日期到数据库"""
     try:
-        with open(license_path, 'w') as f:
-            f.write(key)
-        with open(date_path, 'w') as f:
-            f.write(datetime.date.today().isoformat())
+        db_path = get_db_path()
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # 确保激活信息表存在
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS activation_info (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                activation_key TEXT NOT NULL,
+                activation_date TEXT NOT NULL,
+                machine_id TEXT NOT NULL,
+                created_time TEXT NOT NULL
+            )
+        """)
+        
+        # 先清空之前的激活记录（保证唯一性）
+        cursor.execute("DELETE FROM activation_info")
+        
+        # 插入新的激活信息
+        machine_id = get_machine_id()
+        current_time = datetime.datetime.now().isoformat()
+        activation_date = datetime.date.today().isoformat()
+        
+        cursor.execute("""
+            INSERT INTO activation_info (activation_key, activation_date, machine_id, created_time)
+            VALUES (?, ?, ?, ?)
+        """, (key, activation_date, machine_id, current_time))
+        
+        conn.commit()
+        conn.close()
         return True
+        
     except Exception as e:
-        messagebox.showerror("保存失败", f"无法写入许可证文件: {e}")
+        messagebox.showerror("保存失败", f"无法保存激活信息到数据库: {e}")
         return False
 
 class RegistrationWindow(tk.Tk):
