@@ -157,6 +157,7 @@ class ListeningPlayer(tk.Tk):
         self.is_paused = True
         self.is_loaded = False
         self.seek_offset = 0.0
+        self.pause_position = 0.0  # Track exact pause position for resume
         
         # --- NEW: State for sentence looping ---
         self.is_looping_sentence = False
@@ -176,12 +177,19 @@ class ListeningPlayer(tk.Tk):
         self.dictation_sentence_playing = False  # 当前句子是否正在播放
         self.dictation_current_sentence = 0  # 当前听写句子索引
         self.dictation_results = []  # 听写结果记录
+        self.dictation_auto_pause_job = None  # 自动暂停任务ID
         self.dictation_stats = {  # 听写统计
             'total_chars': 0,
             'correct_chars': 0,
             'total_sentences': 0,
             'correct_sentences': 0
         }
+        # 听写模式播放状态保存
+        self.dictation_saved_position = 0  # 保存进入听写模式前的播放位置
+        self.dictation_saved_paused_state = True  # 保存进入听写模式前的暂停状态
+        self.dictation_paused_manually = False # 是否为手动暂停
+        self.dictation_pause_time = 0.0        # 句子内暂停时间点
+        self.dictation_play_start_time = 0.0   # 句子开始播放的系统时间
         
         # --- 异步处理相关 ---
         self.thread_pool = ThreadPoolExecutor(max_workers=2)  # 限制线程数量
@@ -1775,13 +1783,26 @@ class ListeningPlayer(tk.Tk):
         
         if self.is_paused:
             total_length = self.progress_bar.cget("to")
-            current_pos = self.progress_bar.get()
+            
+            # Use pause_position if available, otherwise use progress bar position
+            if hasattr(self, 'pause_position') and self.pause_position > 0:
+                current_pos = self.pause_position
+            else:
+                current_pos = self.progress_bar.get()
 
             if current_pos >= total_length - 0.1:
                 self.seek_offset = 0.0
+                self.pause_position = 0.0
                 self.progress_bar.set(0.0) 
             else:
                 self.seek_offset = current_pos
+                self.pause_position = 0.0  # Reset after using
+            
+            # 确保加载正确的音频文件
+            try:
+                pygame.mixer.music.load(self.current_audio_path)
+            except Exception as e:
+                pass
             
             pygame.mixer.music.play(start=self.seek_offset)
             self.play_pause_btn.config(text="⏸ 暂停")
@@ -1792,6 +1813,10 @@ class ListeningPlayer(tk.Tk):
                 segment_duration = (datetime.datetime.now() - self.current_segment_start_time).total_seconds()
                 self.current_audio_accumulated_duration += segment_duration
                 self.current_segment_start_time = None
+            
+            # Calculate and store exact pause position
+            current_pos = pygame.mixer.music.get_pos() / 1000.0 if pygame.mixer.music.get_busy() else 0
+            self.pause_position = self.seek_offset + current_pos
             
             pygame.mixer.music.pause()
             self.play_pause_btn.config(text="▶ 播放")
@@ -1812,6 +1837,11 @@ class ListeningPlayer(tk.Tk):
         self.seek_offset = seek_time
 
         if not self.is_paused:
+            # 确保加载正确的音频文件
+            try:
+                pygame.mixer.music.load(self.current_audio_path)
+            except Exception as e:
+                pass
             pygame.mixer.music.play(start=seek_time)
             self.current_segment_start_time = datetime.datetime.now()
         else:
@@ -1873,11 +1903,6 @@ class ListeningPlayer(tk.Tk):
                                foreground=self.colors['text_primary'])
         title_label.pack()
         
-        # 进度显示
-        self.dictation_progress_label = ttk.Label(title_frame, text="准备开始", 
-                                                 font=("Segoe UI", 14),
-                                                 foreground=self.colors['text_secondary'])
-        self.dictation_progress_label.pack(pady=(5, 0))
         
         # 内容区域
         content_frame = ttk.Frame(main_container)
@@ -1887,12 +1912,6 @@ class ListeningPlayer(tk.Tk):
         sentence_frame = ttk.Frame(content_frame)
         sentence_frame.pack(expand=True, fill=tk.BOTH)
         
-        self.dictation_sentence_label = ttk.Label(sentence_frame, text="点击'播放句子'开始听写练习", 
-                                                 font=("Segoe UI", 16, "bold"),
-                                                 foreground=self.colors['text_primary'],
-                                                 justify=tk.CENTER,
-                                                 wraplength=800)
-        self.dictation_sentence_label.pack(expand=True, pady=(50, 30))
         
         # 输入区域
         input_container = ttk.Frame(content_frame)
@@ -1992,15 +2011,26 @@ class ListeningPlayer(tk.Tk):
     
     def show_dictation_view(self):
         """显示听写练习界面"""
+        # 保存当前播放状态
+        self.dictation_saved_position = self.progress_bar.get()
+        self.dictation_saved_paused_state = self.is_paused
+        
         # 暂停播放
         if not self.is_paused:
             self.toggle_play_pause()
+        
+        # 停止player_state更新循环，避免干扰听写模式
+        if self._update_job:
+            self.after_cancel(self._update_job)
+            self._update_job = None
         
         # 隐藏播放界面
         self.player_frame.pack_forget()
         
         # 显示听写界面
         self.dictation_frame.pack(expand=True, fill=tk.BOTH)
+        # Ensure playback is independent in dictation mode
+        pygame.mixer.music.stop()
         
         # 初始化听写状态
         self.is_dictation_mode = True
@@ -2026,8 +2056,37 @@ class ListeningPlayer(tk.Tk):
     
     def back_to_player_from_dictation(self):
         """从听写界面返回到播放界面"""
+        # 停止听写模式的播放
+        self.stop_dictation_playback()
+        
         # 隐藏听写界面
         self.hide_dictation_view()
+        
+        # 重新加载原始音频文件，确保切换回正常音频
+        try:
+            pygame.mixer.music.load(self.current_audio_path)
+        except Exception as e:
+            pass
+        
+        # 恢复播放状态和位置
+        self.progress_bar.config(to=self.current_audio_total_length)
+        self.progress_bar.set(self.dictation_saved_position)
+        self.seek_offset = self.dictation_saved_position
+        
+        # 确保音频完全停止
+        pygame.mixer.music.stop()
+        
+        # 如果之前是播放状态，恢复播放
+        if not self.dictation_saved_paused_state:
+            pygame.mixer.music.play(start=self.seek_offset)
+            self.is_paused = False
+            self.play_pause_btn.config(text="⏸ 暂停")
+            # 重新启动状态更新循环
+            self.current_segment_start_time = datetime.datetime.now()
+            self.update_player_state()
+        else:
+            self.is_paused = True
+            self.play_pause_btn.config(text="▶ 播放")
         
         # 显示播放界面
         self.show_player_view()
@@ -2129,35 +2188,72 @@ class ListeningPlayer(tk.Tk):
         self.create_dictation_ui()
     
     def play_dictation_sentence(self):
-        """播放当前听写句子"""
+        """播放当前听写句子，支持从暂停处继续"""
         if not self.lyrics or self.dictation_current_sentence >= len(self.lyrics):
             return
-        
-        # 获取当前句子的时间
-        start_time = self.lyrics[self.dictation_current_sentence][0]
-        
-        # 使用与播放界面相同的跳转逻辑
-        self.progress_bar.set(start_time)
-        self.perform_seek(None)  # 使用相同的seek逻辑
-        
-        # 如果音频处于暂停状态，开始播放
-        if self.is_paused:
-            pygame.mixer.music.play(start=start_time)
-            self.is_paused = False
-        
-        # 标记句子正在播放
-        self.dictation_sentence_playing = True
-        self.dictation_play_btn.config(text="🔊 播放中...", state=tk.DISABLED)
-        
-        # 计算句子播放时长，自动暂停
+
+        # 如果当前正在播放，则调用暂停
+        if self.dictation_sentence_playing:
+            self.pause_dictation_sentence()
+            return
+
+        # 获取句子的基础起止时间
+        base_start_time = self.lyrics[self.dictation_current_sentence][0]
         if self.dictation_current_sentence < len(self.lyrics) - 1:
             end_time = self.lyrics[self.dictation_current_sentence + 1][0]
         else:
             end_time = self.current_audio_total_length
         
+        # 如果是手动暂停后继续，则从暂停点开始
+        if self.dictation_paused_manually:
+            start_offset = self.dictation_pause_time
+            start_time = base_start_time + start_offset
+        else:  # 否则从头开始
+            self.dictation_pause_time = 0.0
+            start_time = base_start_time
+
         duration = end_time - start_time
-        # 延迟暂停播放
-        self.after(int(duration * 1000 + 500), self.pause_dictation_playback)
+        if duration <= 0:
+            self.pause_dictation_playback() # 如果时长无效，直接处理为播放结束
+            return
+            
+        # 每次播放前都重新加载，确保pygame.mixer.music控制的是正确的音频和状态
+        try:
+            pygame.mixer.music.load(self.current_audio_path)
+            pygame.mixer.music.play(start=start_time)
+        except Exception as e:
+            messagebox.showerror("播放错误", f"无法播放音频片段：{e}", parent=self)
+            return
+        
+        # 更新状态
+        self.dictation_play_start_time = time.time()
+        self.dictation_sentence_playing = True
+        self.dictation_paused_manually = False
+        self.dictation_play_btn.config(text="⏸ 暂停播放")
+
+        # 设置自动暂停任务
+        if self.dictation_auto_pause_job:
+            self.after_cancel(self.dictation_auto_pause_job)
+        # 增加100ms缓冲，防止提前触发
+        self.dictation_auto_pause_job = self.after(int(duration * 1000 + 100), self.pause_dictation_playback)
+    
+    def pause_dictation_sentence(self):
+        """手动暂停听写句子播放"""
+        if hasattr(self, 'dictation_auto_pause_job') and self.dictation_auto_pause_job:
+            # 取消自动暂停任务
+            self.after_cancel(self.dictation_auto_pause_job)
+            self.dictation_auto_pause_job = None
+        
+        # 计算已播放时间并保存为暂停点
+        if hasattr(self, 'dictation_play_start_time') and self.dictation_play_start_time:
+            elapsed_time = time.time() - self.dictation_play_start_time
+            self.dictation_pause_time += elapsed_time  # 累加到已有的暂停时间
+            self.dictation_paused_manually = True
+        
+        pygame.mixer.music.pause()
+        self.is_paused = True
+        self.dictation_sentence_playing = False
+        self.dictation_play_btn.config(text="🔊 播放句子", state=tk.NORMAL)
     
     def pause_dictation_playback(self):
         """听写句子播放完成后自动暂停"""
@@ -2165,6 +2261,23 @@ class ListeningPlayer(tk.Tk):
         self.is_paused = True
         self.dictation_sentence_playing = False
         self.dictation_play_btn.config(text="🔊 播放句子", state=tk.NORMAL)
+        self.dictation_auto_pause_job = None
+    
+    def stop_dictation_playback(self):
+        """停止听写模式的播放，确保状态清理"""
+        # 取消自动暂停任务
+        if hasattr(self, 'dictation_auto_pause_job') and self.dictation_auto_pause_job:
+            self.after_cancel(self.dictation_auto_pause_job)
+            self.dictation_auto_pause_job = None
+        
+        # 完全停止音频播放（而不是暂停）
+        pygame.mixer.music.stop()
+        self.is_paused = True
+        self.dictation_sentence_playing = False
+        
+        # 重置播放按钮状态
+        if hasattr(self, 'dictation_play_btn'):
+            self.dictation_play_btn.config(text="🔊 播放句子", state=tk.NORMAL)
     
     def submit_dictation_answer(self):
         """提交听写答案并显示对比结果"""
@@ -2365,18 +2478,18 @@ class ListeningPlayer(tk.Tk):
             if hasattr(self, 'dictation_next_btn'):
                 self.dictation_next_btn.config(state=tk.DISABLED)
         else:
-            # 显示当前进度
+        # 显示当前进度
             current_progress = self.dictation_current_sentence + 1
             total_sentences = len(self.lyrics)
+            
             
             if self.dictation_stats['total_sentences'] > 0:
                 char_accuracy = (self.dictation_stats['correct_chars'] / self.dictation_stats['total_chars']) * 100
                 sentence_accuracy = (self.dictation_stats['correct_sentences'] / self.dictation_stats['total_sentences']) * 100
-                stats_text = (f"进度：{current_progress}/{total_sentences} | "
-                           f"字符准确率：{char_accuracy:.1f}% | "
+                stats_text = (f"第 {current_progress}/{total_sentences} 句 | 字符准确率：{char_accuracy:.1f}% | "
                            f"句子准确率：{sentence_accuracy:.1f}%")
             else:
-                stats_text = f"进度：{current_progress}/{total_sentences} | 准备开始第 {current_progress} 句"
+                stats_text = f"第 {current_progress}/{total_sentences} 句"
             
             # 确保按钮可用
             if hasattr(self, 'dictation_play_btn'):
