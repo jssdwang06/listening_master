@@ -643,6 +643,78 @@ class ListeningPlayer(tk.Tk):
         cursor.execute("SELECT id, audio_path, start_time, duration, total_audio_length FROM sessions ORDER BY start_time DESC")
         history_data = cursor.fetchall()
         return None, None, history_data
+    
+    def get_activation_info(self):
+        """获取激活信息"""
+        try:
+            cursor = self.db_conn.cursor()
+            cursor.execute("SELECT activation_date, created_time FROM activation_info ORDER BY created_time DESC LIMIT 1")
+            result = cursor.fetchone()
+            if result:
+                activation_date, created_time = result
+                return {
+                    'activation_date': activation_date,
+                    'created_time': created_time
+                }
+            return None
+        except Exception as e:
+            # 如果表不存在或查询失败，返回None
+            return None
+    
+    def update_day_position(self):
+        """根据窗口大小响应式更新DAY X的位置"""
+        try:
+            if not hasattr(self, 'day_section') or not hasattr(self, 'window_info'):
+                return
+            
+            # 获取窗口尺寸信息
+            current_width = self.window_info.get('current_width', 1200)
+            current_height = self.window_info.get('current_height', 800)
+            default_width = self.window_info.get('default_width', 1200)
+            default_height = self.window_info.get('default_height', 800)
+            
+            # 计算缩放比例
+            width_ratio = current_width / default_width
+            height_ratio = current_height / default_height
+            scale_ratio = min(width_ratio, height_ratio)
+            
+            # 限制缩放比例在合理范围内
+            scale_ratio = max(0.8, min(1.3, scale_ratio))
+            
+            # 基于缩放比例计算位置
+            base_x = 150
+            base_y = 150
+            
+            # 根据缩放比例调整位置
+            new_x = int(base_x * scale_ratio)
+            new_y = int(base_y * scale_ratio)
+            
+            # 确保位置不会超出窗口边界
+            max_x = max(20, current_width - 200)  # 留出足够的空间显示DAY X内容
+            max_y = max(60, current_height - 150)
+            
+            new_x = min(new_x, max_x)
+            new_y = min(new_y, max_y)
+            
+            # 更新位置
+            self.day_section.place(x=new_x, y=new_y)
+            
+            # 更新DAY X标签的字体大小
+            if hasattr(self, 'day_label_main'):
+                day_font_size = int(32 * scale_ratio)
+                self.day_label_main.config(font=("Segoe UI", day_font_size, "bold"))
+            
+            if hasattr(self, 'day_label_sub'):
+                sub_font_size = int(16 * scale_ratio)
+                self.day_label_sub.config(font=("Segoe UI", sub_font_size, "bold"))
+            
+        except Exception as e:
+            # 如果更新位置时出错，静默处理
+            pass
+
+    def on_window_resize_with_day_update(self, event):
+        """响应窗口大小变化并更新DAY X显示"""
+        self.update_day_position()
 
     def on_closing(self):
         self.finalize_current_audio_session()
@@ -658,9 +730,39 @@ class ListeningPlayer(tk.Tk):
 
         top_section = ttk.Frame(self.initial_frame)
         top_section.pack(pady=(40, 20), fill=tk.X, padx=40)
-        ttk.Label(top_section, text="学无止境，听力先行。", font=(font_main, 22, "bold"), foreground=self.colors['text_primary']).pack(pady=(20, 5), anchor='center')
-        ttk.Label(top_section, text="相信自己，听力突破从现在开始！", font=(font_main, 14), foreground=self.colors['text_secondary']).pack(pady=(0, 20), anchor='center')
-        ttk.Button(top_section, text="🎧 加载音频", command=self.load_files, style="Primary.TButton").pack(pady=10, ipady=5, anchor='center')
+        
+        # 创建主内容容器，用于居中对齐主要内容
+        main_content_frame = ttk.Frame(self.initial_frame)
+        main_content_frame.pack(expand=True, fill=tk.BOTH, padx=40, pady=20)
+        
+        # 获取激活信息来显示DAY X
+        activation_info = self.get_activation_info()
+        if activation_info:
+            activation_date = datetime.datetime.fromisoformat(activation_info['activation_date'])
+            days_since_activation = (datetime.datetime.now() - activation_date).days + 1
+            
+            # DAY X信息 - 响应式定位，根据窗口大小调整位置
+            self.day_section = ttk.Frame(self.initial_frame)
+            self.day_label_main = ttk.Label(self.day_section, text=f"DAY {days_since_activation}", font=(font_main, 32, "bold"), foreground=self.colors['text_primary'])
+            self.day_label_main.pack(pady=(0, 5))
+            self.day_label_sub = ttk.Label(self.day_section, text="你真的很棒了", font=(font_main, 16, "bold"), foreground=self.colors['text_primary'])
+            self.day_label_sub.pack()
+            # 初始定位将在窗口显示后设置
+            self.after(50, self.update_day_position)
+            
+            # 绑定窗口大小变化事件到DAY X位置更新
+            self.bind('<Configure>', self.on_window_resize_with_day_update, add='+')
+        
+        # 主要内容区域 - 保持居中对齐（不受DAY X影响）
+        main_section = ttk.Frame(main_content_frame)
+        main_section.pack(pady=(20, 20))
+        ttk.Label(main_section, text="学无止境，听力先行。", font=(font_main, 22, "bold"), foreground=self.colors['text_primary']).pack(pady=(20, 5), anchor='center')
+        ttk.Label(main_section, text="相信自己，听力突破从现在开始！", font=(font_main, 14), foreground=self.colors['text_secondary']).pack(pady=(0, 20), anchor='center')
+        ttk.Button(main_section, text="🎧 加载音频", command=self.load_files, style="Primary.TButton").pack(pady=10, ipady=5, anchor='center')
+
+        # 下半部分：学习历史
+        history_section = ttk.Frame(main_content_frame)
+        history_section.pack(expand=True, fill=tk.BOTH, pady=(10, 0))
 
         history_section = ttk.Frame(self.initial_frame)
         history_section.pack(expand=True, fill=tk.BOTH, pady=(10, 20), padx=40)
